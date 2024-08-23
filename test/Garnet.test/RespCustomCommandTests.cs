@@ -11,10 +11,8 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Garnet.server;
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.Text;
 using NUnit.Framework;
+using NUnit.Framework.Legacy;
 using StackExchange.Redis;
 
 namespace Garnet.test
@@ -23,7 +21,6 @@ namespace Garnet.test
     public class RespCustomCommandTests
     {
         GarnetServer server;
-        private IReadOnlyDictionary<string, RespCommandsInfo> respCustomCommandsInfo;
         private string _extTestDir1;
         private string _extTestDir2;
 
@@ -32,9 +29,6 @@ namespace Garnet.test
         {
             _extTestDir1 = Path.Combine(TestUtils.MethodTestDir, "test1");
             _extTestDir2 = Path.Combine(TestUtils.MethodTestDir, "test2");
-
-            Assert.IsTrue(TestUtils.TryGetCustomCommandsInfo(out respCustomCommandsInfo));
-            Assert.IsNotNull(respCustomCommandsInfo);
 
             TestUtils.DeleteDirectory(TestUtils.MethodTestDir, wait: true);
             server = TestUtils.CreateGarnetServer(TestUtils.MethodTestDir,
@@ -56,7 +50,7 @@ namespace Garnet.test
         public void CustomCommandTest1()
         {
             // Register sample custom command (SETIFPM = "set if prefix match")
-            int x = server.Register.NewCommand("SETIFPM", 2, CommandType.ReadModifyWrite, new SetIfPMCustomCommand(), respCustomCommandsInfo["SETIFPM"]);
+            int x = server.Register.NewCommand("SETIFPM", CommandType.ReadModifyWrite, new SetIfPMCustomCommand(), new RespCommandsInfo { Arity = 4 });
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
@@ -70,14 +64,14 @@ namespace Garnet.test
 
             // This conditional set should pass (prefix matches)
             string retValue = db.StringGet(key);
-            Assert.AreEqual(newValue1, retValue);
+            ClassicAssert.AreEqual(newValue1, retValue);
 
             // This conditional set should fail (prefix does not match)
             string newValue2 = "foovalue2";
             db.Execute("SETIFPM", key, newValue2, "bar");
 
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue1, retValue);
+            ClassicAssert.AreEqual(newValue1, retValue);
 
             // This conditional set should pass (prefix matches)
             // New value is smaller than existing
@@ -85,7 +79,7 @@ namespace Garnet.test
             db.Execute("SETIFPM", key, newValue3, "foo");
 
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue3, retValue);
+            ClassicAssert.AreEqual(newValue3, retValue);
 
 
             // This conditional set should pass (prefix matches)
@@ -94,15 +88,14 @@ namespace Garnet.test
             db.Execute("SETIFPM", key, newValue4, "foo");
 
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue4, retValue);
+            ClassicAssert.AreEqual(newValue4, retValue);
         }
 
         [Test]
         public void CustomCommandTest2()
         {
             // Register custom command on raw strings (SETWPIFPGT = "set with prefix, if prefix greater than")
-            server.Register.NewCommand("SETWPIFPGT", 2, CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(),
-                respCustomCommandsInfo["SETWPIFPGT"]);
+            server.Register.NewCommand("SETWPIFPGT", CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(), new RespCommandsInfo { Arity = 4 });
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
@@ -119,16 +112,16 @@ namespace Garnet.test
             catch (Exception ex)
             {
                 exception = true;
-                Assert.AreEqual(SetWPIFPGTCustomCommand.PrefixError, ex.Message);
+                ClassicAssert.AreEqual(SetWPIFPGTCustomCommand.PrefixError, ex.Message);
             }
-            Assert.IsTrue(exception);
+            ClassicAssert.IsTrue(exception);
             string retValue = db.StringGet(key);
-            Assert.AreEqual(null, retValue);
+            ClassicAssert.AreEqual(null, retValue);
 
             // This conditional set should pass (nothing there to begin with)
             db.Execute("SETWPIFPGT", key, origValue, BitConverter.GetBytes((long)0));
             retValue = db.StringGet(key);
-            Assert.AreEqual(retValue.Substring(8), origValue);
+            ClassicAssert.AreEqual(retValue.Substring(8), origValue);
 
             // This conditional set should fail (wrong prefix size)
             var newValue1 = "foovalue1";
@@ -140,50 +133,49 @@ namespace Garnet.test
             catch (Exception ex)
             {
                 exception = true;
-                Assert.AreEqual(SetWPIFPGTCustomCommand.PrefixError, ex.Message);
+                ClassicAssert.AreEqual(SetWPIFPGTCustomCommand.PrefixError, ex.Message);
             }
-            Assert.IsTrue(exception);
+            ClassicAssert.IsTrue(exception);
             retValue = db.StringGet(key);
-            Assert.AreEqual(retValue.Substring(8), origValue);
+            ClassicAssert.AreEqual(retValue.Substring(8), origValue);
 
             // This conditional set should pass (prefix is greater)
             db.Execute("SETWPIFPGT", key, newValue1, BitConverter.GetBytes((long)1));
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue1, retValue.Substring(8));
+            ClassicAssert.AreEqual(newValue1, retValue.Substring(8));
 
             // This conditional set should fail (prefix is not greater)
             var newValue2 = "foovalue2";
             db.Execute("SETWPIFPGT", key, newValue2, BitConverter.GetBytes((long)1));
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue1, retValue.Substring(8));
+            ClassicAssert.AreEqual(newValue1, retValue.Substring(8));
 
             // This conditional set should pass (prefix is greater)
             // New value is smaller than existing
             var newValue3 = "fooval3";
             db.Execute("SETWPIFPGT", key, newValue3, BitConverter.GetBytes((long)3));
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue3, retValue.Substring(8));
+            ClassicAssert.AreEqual(newValue3, retValue.Substring(8));
 
             // This conditional set should pass (prefix is greater)
             // New value is larger than existing
             var newValue4 = "foolargervalue4";
             db.Execute("SETWPIFPGT", key, newValue4, BitConverter.GetBytes((long)4));
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue4, retValue.Substring(8));
+            ClassicAssert.AreEqual(newValue4, retValue.Substring(8));
 
             // This conditional set should pass (prefix is greater)
             var newValue5 = "foolargervalue4";
             db.Execute("SETWPIFPGT", key, newValue4, BitConverter.GetBytes(long.MaxValue));
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue5, retValue.Substring(8));
+            ClassicAssert.AreEqual(newValue5, retValue.Substring(8));
         }
 
         [Test]
         public void CustomCommandTest3()
         {
             // Register custom command on raw strings (SETWPIFPGT = "set with prefix, if prefix greater than")
-            server.Register.NewCommand("SETWPIFPGT", 2, CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(),
-                respCustomCommandsInfo["SETWPIFPGT"]);
+            server.Register.NewCommand("SETWPIFPGT", CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(), new RespCommandsInfo { Arity = 4 });
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
@@ -194,27 +186,26 @@ namespace Garnet.test
             // This conditional set should pass (nothing there to begin with)
             db.Execute("SETWPIFPGT", key, origValue, BitConverter.GetBytes((long)0));
             string retValue = db.StringGet(key);
-            Assert.AreEqual(retValue.Substring(8), origValue);
+            ClassicAssert.AreEqual(retValue.Substring(8), origValue);
 
             db.KeyExpire(key, TimeSpan.FromSeconds(1));
             Thread.Sleep(1100);
 
             // Key expired, return fails
             retValue = db.StringGet(key);
-            Assert.AreEqual(null, retValue);
+            ClassicAssert.AreEqual(null, retValue);
 
             // This conditional set should pass (nothing there to begin with)
             db.Execute("SETWPIFPGT", key, origValue, BitConverter.GetBytes((long)1));
             retValue = db.StringGet(key);
-            Assert.AreEqual(origValue, retValue.Substring(8));
+            ClassicAssert.AreEqual(origValue, retValue.Substring(8));
         }
 
         [Test]
         public void CustomCommandTest4()
         {
             // Register custom command on raw strings (SETWPIFPGT = "set with prefix, if prefix greater than")
-            server.Register.NewCommand("SETWPIFPGT", 2, CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(),
-                respCustomCommandsInfo["SETWPIFPGT"]);
+            server.Register.NewCommand("SETWPIFPGT", CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(), new RespCommandsInfo { Arity = 4 });
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
@@ -225,27 +216,26 @@ namespace Garnet.test
             // This conditional set should pass (nothing there to begin with)
             db.Execute("SETWPIFPGT", key, origValue, BitConverter.GetBytes((long)0));
             string retValue = db.StringGet(key);
-            Assert.AreEqual(retValue.Substring(8), origValue);
+            ClassicAssert.AreEqual(retValue.Substring(8), origValue);
 
             db.KeyExpire(key, TimeSpan.FromSeconds(100));
 
             // Key not expired
             retValue = db.StringGet(key);
-            Assert.AreEqual(retValue.Substring(8), origValue);
+            ClassicAssert.AreEqual(retValue.Substring(8), origValue);
 
             // This conditional set should pass
             var newValue2 = "foovalue2";
             db.Execute("SETWPIFPGT", key, newValue2, BitConverter.GetBytes((long)1));
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue2, retValue.Substring(8));
+            ClassicAssert.AreEqual(newValue2, retValue.Substring(8));
         }
 
         [Test]
         public void CustomCommandTest5()
         {
             // Register custom command on raw strings (SETWPIFPGT = "set with prefix, if prefix greater than")
-            server.Register.NewCommand("SETWPIFPGT", 2, CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(),
-                respCustomCommandsInfo["SETWPIFPGT"]);
+            server.Register.NewCommand("SETWPIFPGT", CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(), new RespCommandsInfo { Arity = 4 });
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
@@ -256,35 +246,35 @@ namespace Garnet.test
             // This conditional set should pass (nothing there to begin with)
             db.Execute("SETWPIFPGT", key, origValue, BitConverter.GetBytes((long)0));
             string retValue = db.StringGet(key);
-            Assert.AreEqual(retValue.Substring(8), origValue);
+            ClassicAssert.AreEqual(retValue.Substring(8), origValue);
 
             db.KeyExpire(key, TimeSpan.FromSeconds(100));
 
             // This conditional set should pass
             db.Execute("SETWPIFPGT", key, origValue, BitConverter.GetBytes((long)1));
             retValue = db.StringGet(key);
-            Assert.AreEqual(origValue, retValue.Substring(8));
+            ClassicAssert.AreEqual(origValue, retValue.Substring(8));
 
             // Expiration should survive operation
             var ttl = db.KeyTimeToLive(key);
-            Assert.IsTrue(ttl > TimeSpan.FromSeconds(10));
+            ClassicAssert.IsTrue(ttl > TimeSpan.FromSeconds(10));
 
             retValue = db.StringGet(key);
-            Assert.AreEqual(retValue.Substring(8), origValue);
+            ClassicAssert.AreEqual(retValue.Substring(8), origValue);
 
             // This conditional set should pass
             var newValue2 = "foovalue2";
             db.Execute("SETWPIFPGT", key, newValue2, BitConverter.GetBytes((long)2));
 
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue2, retValue.Substring(8));
+            ClassicAssert.AreEqual(newValue2, retValue.Substring(8));
         }
 
         [Test]
         public void CustomCommandTest6()
         {
             // Register sample custom command (SETIFPM = "set if prefix match")
-            server.Register.NewCommand("DELIFM", 1, CommandType.ReadModifyWrite, new DeleteIfMatchCustomCommand(), respCustomCommandsInfo["DELIFM"]);
+            server.Register.NewCommand("DELIFM", CommandType.ReadModifyWrite, new DeleteIfMatchCustomCommand(), new RespCommandsInfo { Arity = 3 });
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
@@ -299,14 +289,14 @@ namespace Garnet.test
 
             // Delete should not have happened, as value does not match
             string retValue = db.StringGet(key);
-            Assert.AreEqual(origValue, retValue);
+            ClassicAssert.AreEqual(origValue, retValue);
 
             // DELIFM with same value
             db.Execute("DELIFM", key, origValue);
 
             // Delete should have happened, as value matches
             retValue = db.StringGet(key);
-            Assert.AreEqual(null, retValue);
+            ClassicAssert.AreEqual(null, retValue);
         }
 
         [Test]
@@ -314,8 +304,8 @@ namespace Garnet.test
         {
             // Register sample custom command on object
             var factory = new MyDictFactory();
-            server.Register.NewCommand("MYDICTSET", 2, CommandType.ReadModifyWrite, factory, respCustomCommandsInfo["MYDICTSET"]);
-            server.Register.NewCommand("MYDICTGET", 1, CommandType.Read, factory, respCustomCommandsInfo["MYDICTGET"]);
+            server.Register.NewCommand("MYDICTSET", CommandType.ReadModifyWrite, factory, new MyDictSet(), new RespCommandsInfo { Arity = 4 });
+            server.Register.NewCommand("MYDICTGET", CommandType.Read, factory, new MyDictGet(), new RespCommandsInfo { Arity = 3 });
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
@@ -327,32 +317,31 @@ namespace Garnet.test
             db.Execute("MYDICTSET", mainkey, key1, value1);
 
             var retValue = db.Execute("MYDICTGET", mainkey, key1);
-            Assert.AreEqual(value1, (string)retValue);
+            ClassicAssert.AreEqual(value1, (string)retValue);
 
             var result = db.Execute("MEMORY", "USAGE", mainkey);
-            var actualValue = ResultType.Integer == result.Type ? Int32.Parse(result.ToString()) : -1;
+            var actualValue = ResultType.Integer == result.Resp2Type ? Int32.Parse(result.ToString()) : -1;
             var expectedResponse = 272;
-            Assert.AreEqual(expectedResponse, actualValue);
+            ClassicAssert.AreEqual(expectedResponse, actualValue);
 
             string key2 = "mykey2";
             string value2 = "foovalue2";
             db.Execute("MYDICTSET", mainkey, key2, value2);
 
             retValue = db.Execute("MYDICTGET", mainkey, key2);
-            Assert.AreEqual(value2, (string)retValue);
+            ClassicAssert.AreEqual(value2, (string)retValue);
 
             result = db.Execute("MEMORY", "USAGE", mainkey);
-            actualValue = ResultType.Integer == result.Type ? Int32.Parse(result.ToString()) : -1;
+            actualValue = ResultType.Integer == result.Resp2Type ? Int32.Parse(result.ToString()) : -1;
             expectedResponse = 408;
-            Assert.AreEqual(expectedResponse, actualValue);
+            ClassicAssert.AreEqual(expectedResponse, actualValue);
         }
 
         [Test]
         public void CustomCommandSetWhileKeyHasTtlTest()
         {
             // Register sample custom command (SETWPIFPGT = "set if prefix greater than")
-            server.Register.NewCommand("SETWPIFPGT", 2, CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(),
-                respCustomCommandsInfo["SETWPIFPGT"]);
+            server.Register.NewCommand("SETWPIFPGT", CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(), new RespCommandsInfo { Arity = 4 });
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
@@ -363,30 +352,29 @@ namespace Garnet.test
             long prefix = 0;
             db.Execute("SETWPIFPGT", key, origValue, BitConverter.GetBytes(prefix));
             string retValue = db.StringGet(key);
-            Assert.AreEqual(origValue, retValue.Substring(8));
+            ClassicAssert.AreEqual(origValue, retValue.Substring(8));
 
             db.KeyExpire(key, TimeSpan.FromSeconds(expire));
             var time = db.KeyTimeToLive(key);
-            Assert.IsTrue(time.Value.Seconds > 0);
+            ClassicAssert.IsTrue(time.Value.TotalSeconds > 0);
 
             // This conditional set should pass (new prefix is greater)
             string newValue1 = "foovalue1";
             prefix = 1;
             db.Execute("SETWPIFPGT", key, newValue1, BitConverter.GetBytes(prefix));
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue1, retValue.Substring(8));
+            ClassicAssert.AreEqual(newValue1, retValue.Substring(8));
 
             Thread.Sleep((expire + 1) * 1000);
             string value = db.StringGet(key);
-            Assert.AreEqual(null, value);
+            ClassicAssert.AreEqual(null, value);
         }
 
         [Test]
         public void CustomCommandSetAfterKeyDeletedWithTtlTest()
         {
             // Register sample custom command (SETWPIFPGT = "set if prefix greater than")
-            server.Register.NewCommand("SETWPIFPGT", 2, CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(),
-                respCustomCommandsInfo["SETWPIFPGT"]);
+            server.Register.NewCommand("SETWPIFPGT", CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(), new RespCommandsInfo { Arity = 4 });
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
@@ -402,14 +390,14 @@ namespace Garnet.test
             // Key should expire
             Thread.Sleep((expire + 1) * 1000);
             string value = db.StringGet(key);
-            Assert.AreEqual(null, value);
+            ClassicAssert.AreEqual(null, value);
 
             // Setting on they key that was deleted with a custom command should succeed
             string newValue1 = "foovalue10";
             prefix = 1;
             db.Execute("SETWPIFPGT", key, newValue1, BitConverter.GetBytes(prefix));
             string retValue = db.StringGet(key);
-            Assert.AreEqual(newValue1, retValue.Substring(8));
+            ClassicAssert.AreEqual(newValue1, retValue.Substring(8));
         }
 
         [Test]
@@ -417,8 +405,8 @@ namespace Garnet.test
         {
             // Register sample custom command on object
             var factory = new MyDictFactory();
-            server.Register.NewCommand("MYDICTSET", 2, CommandType.ReadModifyWrite, factory, respCustomCommandsInfo["MYDICTSET"]);
-            server.Register.NewCommand("MYDICTGET", 1, CommandType.Read, factory, respCustomCommandsInfo["MYDICTGET"]);
+            server.Register.NewCommand("MYDICTSET", CommandType.ReadModifyWrite, factory, new MyDictSet(), new RespCommandsInfo { Arity = 4 });
+            server.Register.NewCommand("MYDICTGET", CommandType.Read, factory, new MyDictGet(), new RespCommandsInfo { Arity = 3 });
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
@@ -430,32 +418,61 @@ namespace Garnet.test
             db.Execute("MYDICTSET", mainkey, key1, value1);
 
             var retValue = db.Execute("MYDICTGET", mainkey, key1);
-            Assert.AreEqual(value1, (string)retValue);
+            ClassicAssert.AreEqual(value1, (string)retValue);
 
             db.KeyExpire(mainkey, TimeSpan.FromSeconds(1));
             Thread.Sleep(1100);
 
             retValue = db.Execute("MYDICTGET", mainkey, key1);
-            Assert.AreEqual(null, (string)retValue);
+            ClassicAssert.AreEqual(null, (string)retValue);
 
             string key2 = "mykey2";
             string value2 = "foovalue2";
             db.Execute("MYDICTSET", mainkey, key2, value2);
 
             retValue = db.Execute("MYDICTGET", mainkey, key1);
-            Assert.AreEqual(null, (string)retValue);
+            ClassicAssert.AreEqual(null, (string)retValue);
 
             retValue = db.Execute("MYDICTGET", mainkey, key2);
-            Assert.AreEqual(value2, (string)retValue);
+            ClassicAssert.AreEqual(value2, (string)retValue);
         }
 
+        [Test]
+        public void CustomObjectCommandTest3()
+        {
+            // Register sample custom command on object
+            var factory = new MyDictFactory();
+            server.Register.NewCommand("MYDICTSET", CommandType.ReadModifyWrite, factory, new MyDictSet(), new RespCommandsInfo { Arity = 4 });
+            server.Register.NewCommand("MYDICTGET", CommandType.Read, factory, new MyDictGet(), new RespCommandsInfo { Arity = 3 });
+
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
+
+            var mainkey = "key";
+
+            var key1 = "mykey1";
+            var value1 = "foovalue1";
+            db.ListLeftPush(mainkey, value1);
+
+            var ex = Assert.Throws<RedisServerException>(() => db.Execute("MYDICTGET", mainkey, key1));
+            var expectedError = Encoding.ASCII.GetString(CmdStrings.RESP_ERR_WRONG_TYPE);
+            ClassicAssert.IsNotNull(ex);
+            ClassicAssert.AreEqual(expectedError, ex.Message);
+
+            var deleted = db.KeyDelete(mainkey);
+            ClassicAssert.IsTrue(deleted);
+            db.Execute("MYDICTSET", mainkey, key1, value1);
+
+            ex = Assert.Throws<RedisServerException>(() => db.ListLeftPush(mainkey, value1));
+            ClassicAssert.IsNotNull(ex);
+            ClassicAssert.AreEqual(expectedError, ex.Message);
+        }
 
         [Test]
         public async Task CustomCommandSetFollowedByTtlTestAsync()
         {
             // Register sample custom command (SETWPIFPGT = "set if prefix greater than")
-            server.Register.NewCommand("SETWPIFPGT", 2, CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(),
-                respCustomCommandsInfo["SETWPIFPGT"]);
+            server.Register.NewCommand("SETWPIFPGT", CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(), new RespCommandsInfo { Arity = 4 });
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
             var db = redis.GetDatabase(0);
@@ -469,7 +486,7 @@ namespace Garnet.test
             await db.KeyExpireAsync(key, TimeSpan.FromMinutes(expire));
 
             string retValue = db.StringGet(key);
-            Assert.AreEqual(origValue, retValue.Substring(8));
+            ClassicAssert.AreEqual(origValue, retValue.Substring(8));
 
             string newValue1 = "foovalue10";
             prefix = 1;
@@ -477,15 +494,14 @@ namespace Garnet.test
             await db.KeyExpireAsync(key, TimeSpan.FromMinutes(expire));
 
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue1, retValue.Substring(8));
+            ClassicAssert.AreEqual(newValue1, retValue.Substring(8));
         }
 
         [Test]
         public async Task CustomCommandSetWithCustomExpirationTestAsync()
         {
             // Register sample custom command (SETWPIFPGT = "set if prefix greater than")
-            server.Register.NewCommand("SETWPIFPGT", 2, CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(),
-                respCustomCommandsInfo["SETWPIFPGT"],
+            server.Register.NewCommand("SETWPIFPGT", CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(), new RespCommandsInfo { Arity = 4 },
                 expirationTicks: TimeSpan.FromSeconds(4).Ticks); // provide default expiration at registration time
 
             using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
@@ -498,76 +514,44 @@ namespace Garnet.test
             await db.ExecuteAsync("SETWPIFPGT", key, origValue, BitConverter.GetBytes(prefix));
 
             string retValue = db.StringGet(key);
-            Assert.AreEqual(origValue, retValue.Substring(8));
+            ClassicAssert.AreEqual(origValue, retValue.Substring(8));
 
             string newValue1 = "foovalue10";
             prefix = 1;
             await db.ExecuteAsync("SETWPIFPGT", key, newValue1, BitConverter.GetBytes(prefix));
 
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue1, retValue.Substring(8));
+            ClassicAssert.AreEqual(newValue1, retValue.Substring(8));
 
             Thread.Sleep(5000);
 
             // should be expired now
             retValue = db.StringGet(key);
-            Assert.AreEqual(null, retValue);
+            ClassicAssert.AreEqual(null, retValue);
         }
 
-        public static void CreateTestLibrary(string[] namespaces, string[] referenceFiles, string[] filesToCompile, string dstFilePath)
+        [Test]
+        public void CustomCommandRegistrationTest()
         {
-            if (File.Exists(dstFilePath))
-            {
-                File.Delete(dstFilePath);
-            }
+            server.Register.NewProcedure("SUM", new Sum());
 
-            foreach (var referenceFile in referenceFiles)
-            {
-                Assert.IsTrue(File.Exists(referenceFile), $"File '{Path.GetFullPath(referenceFile)}' does not exist.");
-            }
+            using var redis = ConnectionMultiplexer.Connect(TestUtils.GetConfig());
+            var db = redis.GetDatabase(0);
 
-            var references = referenceFiles.Select(f => MetadataReference.CreateFromFile(f));
+            db.StringSet("key1", "10");
+            db.StringSet("key2", "str10");
+            db.StringSet("key3", "20");
 
-            foreach (var fileToCompile in filesToCompile)
-            {
-                Assert.IsTrue(File.Exists(fileToCompile), $"File '{Path.GetFullPath(fileToCompile)}' does not exist.");
-            }
-
-            var parseFunc = new Func<string, SyntaxTree>(filePath =>
-            {
-                var source = File.ReadAllText(filePath);
-                var stringText = SourceText.From(source, Encoding.UTF8);
-                return SyntaxFactory.ParseSyntaxTree(stringText,
-                    CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Latest), string.Empty);
-            });
-
-            var syntaxTrees = filesToCompile.Select(f => parseFunc(f));
-
-            var compilationOptions = new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
-                .WithAllowUnsafe(true)
-                .WithOverflowChecks(true)
-                .WithOptimizationLevel(OptimizationLevel.Release)
-                .WithUsings(namespaces);
-
-
-            var compilation = CSharpCompilation.Create(Path.GetFileName(dstFilePath), syntaxTrees, references, compilationOptions);
-
-            try
-            {
-                var result = compilation.Emit(dstFilePath);
-                Assert.IsTrue(result.Success);
-            }
-            catch (Exception ex)
-            {
-                Assert.Fail(ex.Message);
-            }
+            // Include non-existent and string keys as well
+            var retValue = db.Execute("SUM", "key1", "key2", "key3", "key4");
+            ClassicAssert.AreEqual("30", retValue.ToString());
         }
 
         private string[] CreateTestLibraries()
         {
             var runtimePath = RuntimeEnvironment.GetRuntimeDirectory();
             var binPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-            Assert.IsNotNull(binPath);
+            ClassicAssert.IsNotNull(binPath);
 
             var namespaces = new[]
             {
@@ -610,7 +594,14 @@ namespace Garnet.test
 
             var libPathToFiles = new Dictionary<string, string[]>
             {
-                { Path.Combine(dir1, "testLib1.dll"), new [] { Path.GetFullPath(@"../main/GarnetServer/Extensions/MyDictObject.cs", TestUtils.RootTestsProjectPath) }},
+                { Path.Combine(dir1, "testLib1.dll"),
+                    new []
+                    {
+                        Path.GetFullPath(@"../main/GarnetServer/Extensions/MyDictObject.cs", TestUtils.RootTestsProjectPath),
+                        Path.GetFullPath(@"../main/GarnetServer/Extensions/MyDictSet.cs", TestUtils.RootTestsProjectPath),
+                        Path.GetFullPath(@"../main/GarnetServer/Extensions/MyDictGet.cs", TestUtils.RootTestsProjectPath)
+                    }
+                },
                 { Path.Combine(dir2, "testLib2.dll"), new [] { Path.GetFullPath(@"../main/GarnetServer/Extensions/SetIfPM.cs", TestUtils.RootTestsProjectPath) }},
                 { Path.Combine(dir2, "testLib3.dll"), new []
                 {
@@ -621,7 +612,7 @@ namespace Garnet.test
 
             foreach (var ltf in libPathToFiles)
             {
-                CreateTestLibrary(namespaces, referenceFiles, ltf.Value, ltf.Key);
+                TestUtils.CreateTestLibrary(namespaces, referenceFiles, ltf.Value, ltf.Key);
             }
 
             var notAllowedPath = Path.Combine(TestUtils.MethodTestDir, "testLib1.dll");
@@ -645,15 +636,15 @@ namespace Garnet.test
             {
                 "TXN", "READWRITETX", 3, "ReadWriteTxn",
                 "RMW", "SETIFPM", 2, "SetIfPMCustomCommand", TimeSpan.FromSeconds(10).Ticks,
-                "RMW", "MYDICTSET", 2, "MyDictFactory",
-                "READ", "MYDICTGET", 1, "MyDictFactory",
+                "RMW", "MYDICTSET", 2, "MyDictFactory", "MyDictSet",
+                "READ", "MYDICTGET", 1, "MyDictFactory", "MyDictGet",
                 "SRC",
             };
             args.AddRange(libraryPaths);
 
             // Register select custom commands and transactions
             var resp = (string)db.Execute($"REGISTERCS",
-                args.ToArray());
+                [.. args]);
 
             // Test READWRITETX
             string key = "readkey";
@@ -664,15 +655,15 @@ namespace Garnet.test
             string writekey2 = "writekey2";
 
             var result = db.Execute("READWRITETX", key, writekey1, writekey2);
-            Assert.AreEqual("SUCCESS", (string)result);
+            ClassicAssert.AreEqual("SUCCESS", (string)result);
 
             // Read keys to verify transaction succeeded
             string retValue = db.StringGet(writekey1);
-            Assert.IsNotNull(retValue);
-            Assert.AreEqual(value, retValue);
+            ClassicAssert.IsNotNull(retValue);
+            ClassicAssert.AreEqual(value, retValue);
 
             retValue = db.StringGet(writekey2);
-            Assert.AreEqual(value, retValue);
+            ClassicAssert.AreEqual(value, retValue);
 
             // Test SETIFPM
             string newValue1 = "foovalue1";
@@ -680,17 +671,17 @@ namespace Garnet.test
 
             // This conditional set should pass (prefix matches)
             result = db.Execute("SETIFPM", key, newValue1, "foo");
-            Assert.AreEqual("OK", (string)result);
+            ClassicAssert.AreEqual("OK", (string)result);
 
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue1, retValue);
+            ClassicAssert.AreEqual(newValue1, retValue);
 
             // This conditional set should fail (prefix does not match)
             result = db.Execute("SETIFPM", key, newValue2, "bar");
-            Assert.AreEqual("OK", (string)result);
+            ClassicAssert.AreEqual("OK", (string)result);
 
             retValue = db.StringGet(key);
-            Assert.AreEqual(newValue1, retValue);
+            ClassicAssert.AreEqual(newValue1, retValue);
 
             // Test MYDICTSET
             string newKey1 = "newkey1";
@@ -699,13 +690,13 @@ namespace Garnet.test
             db.Execute("MYDICTSET", key, newKey1, newValue1);
 
             var dictVal = db.Execute("MYDICTGET", key, newKey1);
-            Assert.AreEqual(newValue1, (string)dictVal);
+            ClassicAssert.AreEqual(newValue1, (string)dictVal);
 
             db.Execute("MYDICTSET", key, newKey2, newValue2);
 
             // Test MYDICTGET
             dictVal = db.Execute("MYDICTGET", key, newKey2);
-            Assert.AreEqual(newValue2, (string)dictVal);
+            ClassicAssert.AreEqual(newValue2, (string)dictVal);
         }
 
         [Test]
@@ -724,9 +715,9 @@ namespace Garnet.test
             }
             catch (RedisServerException rse)
             {
-                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_MALFORMED_REGISTERCS_COMMAND), rse.Message);
+                ClassicAssert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_MALFORMED_REGISTERCS_COMMAND), rse.Message);
             }
-            Assert.IsNull(resp);
+            ClassicAssert.IsNull(resp);
 
             // Malformed request #2 - binary paths before sub-command
             var args = new List<object>() { "SRC" };
@@ -735,13 +726,13 @@ namespace Garnet.test
 
             try
             {
-                resp = (string)db.Execute($"REGISTERCS", args.ToArray());
+                resp = (string)db.Execute($"REGISTERCS", [.. args]);
             }
             catch (RedisServerException rse)
             {
-                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_MALFORMED_REGISTERCS_COMMAND), rse.Message);
+                ClassicAssert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_MALFORMED_REGISTERCS_COMMAND), rse.Message);
             }
-            Assert.IsNull(resp);
+            ClassicAssert.IsNull(resp);
 
             // Binary file not contained in allowed paths
             args =
@@ -756,13 +747,13 @@ namespace Garnet.test
 
             try
             {
-                resp = (string)db.Execute($"REGISTERCS", args.ToArray());
+                resp = (string)db.Execute($"REGISTERCS", [.. args]);
             }
             catch (RedisServerException rse)
             {
-                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_BINARY_FILES_NOT_IN_ALLOWED_PATHS), rse.Message);
+                ClassicAssert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_BINARY_FILES_NOT_IN_ALLOWED_PATHS), rse.Message);
             }
-            Assert.IsNull(resp);
+            ClassicAssert.IsNull(resp);
 
             // Class not in supplied dlls
             args =
@@ -777,13 +768,13 @@ namespace Garnet.test
 
             try
             {
-                resp = (string)db.Execute($"REGISTERCS", args.ToArray());
+                resp = (string)db.Execute($"REGISTERCS", [.. args]);
             }
             catch (RedisServerException rse)
             {
-                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_INSTANTIATING_CLASS), rse.Message);
+                ClassicAssert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_INSTANTIATING_CLASS), rse.Message);
             }
-            Assert.IsNull(resp);
+            ClassicAssert.IsNull(resp);
 
             // Class not in supported
             args =
@@ -798,13 +789,13 @@ namespace Garnet.test
 
             try
             {
-                resp = (string)db.Execute($"REGISTERCS", args.ToArray());
+                resp = (string)db.Execute($"REGISTERCS", [.. args]);
             }
             catch (RedisServerException rse)
             {
-                Assert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_REGISTERCS_UNSUPPORTED_CLASS), rse.Message);
+                ClassicAssert.AreEqual(Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_REGISTERCS_UNSUPPORTED_CLASS), rse.Message);
             }
-            Assert.IsNull(resp);
+            ClassicAssert.IsNull(resp);
         }
     }
 }

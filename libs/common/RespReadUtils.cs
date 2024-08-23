@@ -2,7 +2,6 @@
 // Licensed under the MIT license.
 
 using System;
-using System.Buffers;
 using System.Buffers.Text;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -100,7 +99,6 @@ namespace Garnet.common
             return true;
         }
 
-
         /// <summary>
         /// Tries to read a signed 64-bit integer from a given ASCII-encoded input stream.
         /// </summary>
@@ -113,7 +111,7 @@ namespace Garnet.common
         /// a valid integer or the end of the string was reached before finishing parsing.
         /// </returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static bool TryReadLong(ref byte* ptr, byte* end, out long value, out ulong bytesRead)
+        public static bool TryReadLong(ref byte* ptr, byte* end, out long value, out ulong bytesRead)
         {
             bytesRead = 0;
             value = 0;
@@ -167,7 +165,7 @@ namespace Garnet.common
         /// a valid integer or the end of the string was reached before finishing parsing.
         /// </returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static bool TryReadInt(ref byte* ptr, byte* end, out int value, out ulong bytesRead)
+        public static bool TryReadInt(ref byte* ptr, byte* end, out int value, out ulong bytesRead)
         {
             bytesRead = 0;
             value = 0;
@@ -212,15 +210,51 @@ namespace Garnet.common
         /// <summary>
         /// Tries to read a RESP length header from the given ASCII-encoded RESP string
         /// and, if successful, moves the given ptr to the end of the length header.
+        /// NOTE:
+        ///     It will throw an exception if length header is negative. 
+        ///     It is primarily used for parsing header length from packets received from server side.
         /// </summary>
         /// <param name="length">If parsing was successful, contains the extracted length from the header.</param>
         /// <param name="ptr">The starting position in the RESP string. Will be advanced if parsing is successful.</param>
         /// <param name="end">The current end of the RESP string.</param>
-        /// <param name="allowNull">Whether to allow special null length header ($-1\r\n).</param>
         /// <param name="isArray">Whether to parse an array length header ('*...\r\n') or a string length header ('$...\r\n').</param>
         /// <returns>True if a length header was successfully read.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static bool ReadLengthHeader(out int length, ref byte* ptr, byte* end, bool allowNull = false, bool isArray = false)
+        public static bool ReadUnsignedLengthHeader(out int length, ref byte* ptr, byte* end, bool isArray = false)
+        {
+            length = -1;
+            if (ptr + 3 > end)
+                return false;
+
+            var readHead = ptr + 1;
+            var negative = *readHead == '-';
+
+            if (negative)
+            {
+                RespParsingException.ThrowInvalidStringLength(length);
+            }
+
+            if (!ReadSignedLengthHeader(out length, ref ptr, end, isArray))
+                return false;
+
+            return true;
+        }
+
+        /// <summary>
+        /// Tries to read a RESP a signed length header from the given ASCII-encoded RESP string
+        /// and, if successful, moves the given ptr to the end of the length header.
+        /// NOTE:
+        ///     It will not throw an exception if length header is negative.
+        ///     It is primarily used by client side code.
+        ///     Should not be called by any server code since server side does not accept null values
+        /// </summary>
+        /// <param name="length">If parsing was successful, contains the extracted length from the header.</param>
+        /// <param name="ptr">The starting position in the RESP string. Will be advanced if parsing is successful.</param>
+        /// <param name="end">The current end of the RESP string.</param>
+        /// <param name="isArray">Whether to parse an array length header ('*...\r\n') or a string length header ('$...\r\n').</param>
+        /// <returns>True if a length header was successfully read.</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool ReadSignedLengthHeader(out int length, ref byte* ptr, byte* end, bool isArray = false)
         {
             length = -1;
             if (ptr + 3 > end)
@@ -243,7 +277,7 @@ namespace Garnet.common
                     return false;
                 }
 
-                if (allowNull && (*(uint*)readHead == MemoryMarshal.Read<uint>("-1\r\n"u8)))
+                if (*(uint*)readHead == MemoryMarshal.Read<uint>("-1\r\n"u8))
                 {
                     ptr = readHead + 4;
                     return true;
@@ -263,17 +297,13 @@ namespace Garnet.common
             }
 
             // Validate length
-            length = (int)value;
-
-            if (negative)
-            {
-                RespParsingException.ThrowInvalidStringLength(-length);
-            }
-
             if (value > int.MaxValue)
             {
                 RespParsingException.ThrowIntegerOverflow(readHead - digitsRead, (int)digitsRead);
             }
+
+            // Convert to signed value
+            length = negative ? -(int)value : (int)value;
 
             // Ensure terminator has been received
             ptr = readHead + 2;
@@ -329,15 +359,26 @@ namespace Garnet.common
         /// <summary>
         /// Tries to read a RESP array length header from the given ASCII-encoded RESP string
         /// and, if successful, moves the given ptr to the end of the length header.
+        /// NOTE: We use ReadUnsignedLengthHeader because server does not accept $-1\r\n headers
         /// </summary>
         /// <param name="length">If parsing was successful, contains the extracted length from the header.</param>
         /// <param name="ptr">The starting position in the RESP string. Will be advanced if parsing is successful.</param>
         /// <param name="end">The current end of the RESP string.</param>
         /// <returns>True if a length header was successfully read.</returns>
+        public static bool ReadUnsignedArrayLength(out int length, ref byte* ptr, byte* end)
+            => ReadUnsignedLengthHeader(out length, ref ptr, end, isArray: true);
 
-        public static bool ReadArrayLength(out int length, ref byte* ptr, byte* end)
-            => ReadLengthHeader(out length, ref ptr, end, isArray: true);
-
+        /// <summary>
+        /// Tries to read a RESP array length header from the given ASCII-encoded RESP string
+        /// and, if successful, moves the given ptr to the end of the length header.
+        /// NOTE: It will not throw an exception if length header is negative.
+        /// </summary>
+        /// <param name="length">If parsing was successful, contains the extracted length from the header.</param>
+        /// <param name="ptr">The starting position in the RESP string. Will be advanced if parsing is successful.</param>
+        /// <param name="end">The current end of the RESP string.</param>
+        /// <returns>True if a length header was successfully read.</returns>
+        public static bool ReadSignedArrayLength(out int length, ref byte* ptr, byte* end)
+            => ReadSignedLengthHeader(out length, ref ptr, end, isArray: true);
 
         /// <summary>
         /// Read int with length header
@@ -347,7 +388,7 @@ namespace Garnet.common
             number = 0;
 
             // Parse RESP string header
-            if (!ReadLengthHeader(out var numberLength, ref ptr, end))
+            if (!ReadUnsignedLengthHeader(out var numberLength, ref ptr, end))
                 return false;
 
             if (ptr + numberLength + 2 > end)
@@ -384,7 +425,7 @@ namespace Garnet.common
             number = 0;
 
             // Parse RESP string header
-            if (!ReadLengthHeader(out var numberLength, ref ptr, end))
+            if (!ReadUnsignedLengthHeader(out var numberLength, ref ptr, end))
                 return false;
 
             if (ptr + numberLength + 2 > end)
@@ -421,7 +462,7 @@ namespace Garnet.common
             number = 0;
 
             // Parse RESP string header
-            if (!ReadLengthHeader(out var numberLength, ref ptr, end))
+            if (!ReadUnsignedLengthHeader(out var numberLength, ref ptr, end))
                 return false;
 
             if (ptr + numberLength + 2 > end)
@@ -451,14 +492,69 @@ namespace Garnet.common
         }
 
         /// <summary>
+        /// Skip byte array with length header
+        /// </summary>
+        public static bool SkipByteArrayWithLengthHeader(ref byte* ptr, byte* end)
+        {
+            // Parse RESP string header
+            if (!ReadUnsignedLengthHeader(out var length, ref ptr, end))
+                return false;
+
+            // Advance read pointer to the end of the array (including terminator)
+            var keyPtr = ptr;
+
+            ptr += length + 2;
+
+            if (ptr > end)
+                return false;
+
+            // Ensure terminator has been received
+            if (*(ushort*)(ptr - 2) != MemoryMarshal.Read<ushort>("\r\n"u8))
+            {
+                RespParsingException.ThrowUnexpectedToken(*(ptr - 2));
+            }
+            return true;
+        }
+
+        /// <summary>
         /// Read byte array with length header
         /// </summary>
         public static bool ReadByteArrayWithLengthHeader(out byte[] result, ref byte* ptr, byte* end)
         {
             result = null;
+            if (!TrySliceWithLengthHeader(out var resultSpan, ref ptr, end))
+                return false;
+
+            result = resultSpan.ToArray();
+            return true;
+        }
+
+        /// <summary>
+        /// Try slice a byte array with length header.
+        /// </summary>
+        /// <remarks>
+        /// SAFETY: Because this hands out a span over the underlying buffer to the caller, 
+        /// it must be aware that any changes in the memory where <paramref name="ptr"/> pointed to 
+        /// will be reflected in the <paramref name="result"/> span. i.e.
+        /// <code>
+        /// byte[] buffer = "$2\r\nAB\r\n"u8.ToArray();
+        /// fixed (byte* ptr = buffer)
+        /// {
+        ///     TrySliceWithLengthHeader(out var result, ref ptr, ptr + buffer.Length);
+        ///     Debug.Assert(result.SequenceEquals("AB"u8)); // True
+        ///     
+        ///     *(ptr - 4) = (byte)'C';
+        ///     *(ptr - 3) = (byte)'D';
+        ///     Debug.Assert(result.SequenceEquals("CD"u8)); // True
+        /// }
+        /// </code>
+        /// </remarks>
+        public static bool TrySliceWithLengthHeader(out ReadOnlySpan<byte> result, scoped ref byte* ptr, byte* end)
+        {
+            result = default;
 
             // Parse RESP string header
-            if (!ReadLengthHeader(out var length, ref ptr, end))
+            if (!ReadUnsignedLengthHeader(out var length, ref ptr, end))
                 return false;
 
             // Advance read pointer to the end of the array (including terminator)
@@ -475,8 +571,7 @@ namespace Garnet.common
                 RespParsingException.ThrowUnexpectedToken(*(ptr - 2));
             }
 
-            result = new Span<byte>(keyPtr, length).ToArray();
-
+            result = new ReadOnlySpan<byte>(keyPtr, length);
             return true;
         }
 
@@ -499,7 +594,7 @@ namespace Garnet.common
             else
             {
                 // Parse malformed RESP string header
-                if (!ReadLengthHeader(out var length, ref ptr, end))
+                if (!ReadUnsignedLengthHeader(out var length, ref ptr, end))
                     return false;
 
                 if (length != 1)
@@ -525,13 +620,13 @@ namespace Garnet.common
         /// <summary>
         /// Tries to read a RESP-formatted string including its length header from the given ASCII-encoded
         /// RESP message and, if successful, moves the given ptr to the end of the string value.
+        /// NOTE: We use ReadUnsignedLengthHeader because server does not accept $-1\r\n headers
         /// </summary>
         /// <param name="result">If parsing was successful, contains the extracted string value.</param>
         /// <param name="ptr">The starting position in the RESP message. Will be advanced if parsing is successful.</param>
         /// <param name="end">The current end of the RESP message.</param>
-        /// <param name="allowNull">Whether to allow the RESP null value ($-1\r\n)</param>
         /// <returns>True if a RESP string was successfully read.</returns>
-        public static bool ReadStringWithLengthHeader(out string result, ref byte* ptr, byte* end, bool allowNull = false)
+        public static bool ReadStringWithLengthHeader(out string result, ref byte* ptr, byte* end)
         {
             result = null;
 
@@ -539,14 +634,8 @@ namespace Garnet.common
                 return false;
 
             // Parse RESP string header
-            if (!ReadLengthHeader(out var length, ref ptr, end, allowNull: allowNull))
+            if (!ReadUnsignedLengthHeader(out var length, ref ptr, end))
                 return false;
-
-            if (allowNull && length < 0)
-            {
-                // NULL value ('$-1\r\n')
-                return true;
-            }
 
             // Extract string content + '\r\n' terminator
             var keyPtr = ptr;
@@ -562,46 +651,67 @@ namespace Garnet.common
                 RespParsingException.ThrowUnexpectedToken(*(ptr - 2));
             }
 
-            result = Encoding.UTF8.GetString(new Span<byte>(keyPtr, length));
+            result = Encoding.UTF8.GetString(new ReadOnlySpan<byte>(keyPtr, length));
 
             return true;
         }
 
         /// <summary>
-        /// Read string with length header
+        /// Try to read a RESP formatted bulk string
+        /// NOTE: This is used with client implementation to parse responses that may include a null value (i.e. $-1\r\n)
         /// </summary>
-        public static bool ReadStringWithLengthHeader(MemoryPool<byte> pool, out MemoryResult<byte> result, ref byte* ptr, byte* end)
+        /// <param name="result"></param>
+        /// <param name="ptr"></param>
+        /// <param name="end"></param>
+        /// <returns></returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool ReadStringResponseWithLengthHeader(out string result, ref byte* ptr, byte* end)
         {
-            result = default;
-            if (ptr + 3 > end)
-                return false;
+            result = null;
 
-            // Parse RESP string header
-            if (!ReadLengthHeader(out var length, ref ptr, end))
+            byte* keyPtr = null;
+            var length = 0;
+            if (!ReadPtrWithSignedLengthHeader(ref keyPtr, ref length, ref ptr, end))
                 return false;
 
             if (length < 0)
+                return true;
+
+            result = Encoding.UTF8.GetString(new ReadOnlySpan<byte>(keyPtr, length));
+            return true;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static bool ReadPtrWithSignedLengthHeader(ref byte* keyPtr, ref int length, ref byte* ptr, byte* end)
+        {
+            // Parse RESP string header
+            if (!ReadSignedLengthHeader(out length, ref ptr, end))
+            {
+                return false;
+            }
+
+            // Allow for null
+            if (length < 0)
             {
                 // NULL value ('$-1\r\n')
+                keyPtr = null;
                 return true;
             }
 
-            // Extract string content + '\r\n' terminator
-            var keyPtr = ptr;
+            keyPtr = ptr;
 
+            // Parse content: ensure that input contains key + '\r\n'
             ptr += length + 2;
-
             if (ptr > end)
+            {
                 return false;
+            }
 
-            // Ensure terminator has been received
             if (*(ushort*)(ptr - 2) != MemoryMarshal.Read<ushort>("\r\n"u8))
             {
                 RespParsingException.ThrowUnexpectedToken(*(ptr - 2));
             }
 
-            result = MemoryResult<byte>.Create(pool, length);
-            new ReadOnlySpan<byte>(keyPtr, length).CopyTo(result.Span);
             return true;
         }
 
@@ -667,82 +777,17 @@ namespace Garnet.common
         }
 
         /// <summary>
-        /// Read simple string
-        /// </summary>
-        public static bool ReadSimpleString(MemoryPool<byte> pool, out MemoryResult<byte> result, ref byte* ptr, byte* end)
-        {
-            result = default;
-            if (ptr + 2 >= end)
-                return false;
-
-            // Simple strings need to start with a '+'
-            if (*ptr != '+')
-            {
-                RespParsingException.ThrowUnexpectedToken(*ptr);
-            }
-
-            ptr++;
-
-            return ReadString(pool, out result, ref ptr, end);
-        }
-
-        /// <summary>
-        /// Read error as string
-        /// </summary>
-        public static bool ReadErrorAsString(MemoryPool<byte> pool, out MemoryResult<byte> result, ref byte* ptr, byte* end)
-        {
-            result = default;
-            if (ptr + 2 >= end)
-                return false;
-
-            // Error strings need to start with a '-'
-            if (*ptr != '-')
-            {
-                RespParsingException.ThrowUnexpectedToken(*ptr);
-            }
-
-            ptr++;
-
-            return ReadString(pool, out result, ref ptr, end);
-        }
-
-        /// <summary>
-        /// Read integer as string
-        /// </summary>
-        public static bool ReadIntegerAsString(MemoryPool<byte> pool, out MemoryResult<byte> result, ref byte* ptr, byte* end)
-        {
-            result = default;
-            if (ptr + 2 >= end)
-                return false;
-
-            // Integer strings need to start with a ':'
-            if (*ptr != ':')
-            {
-                RespParsingException.ThrowUnexpectedToken(*ptr);
-            }
-
-            ptr++;
-
-            return ReadString(pool, out result, ref ptr, end);
-        }
-
-        /// <summary>
         /// Read string array with length header
+        /// NOTE: We use ReadUnsignedLengthHeader because server does not accept *-1\r\n headers.
         /// </summary>
         public static bool ReadStringArrayWithLengthHeader(out string[] result, ref byte* ptr, byte* end)
         {
             result = null;
 
             // Parse RESP array header
-            if (!ReadArrayLength(out var length, ref ptr, end))
+            if (!ReadUnsignedArrayLength(out var length, ref ptr, end))
             {
                 return false;
-            }
-
-            if (length < 0)
-            {
-                // NULL value ('*-1\r\n')
-                return true;
             }
 
             // Parse individual strings in the array
@@ -767,11 +812,13 @@ namespace Garnet.common
         /// <summary>
         /// Read string array with length header
         /// </summary>
-        public static bool ReadStringArrayWithLengthHeader(MemoryPool<byte> pool, out MemoryResult<byte>[] result, ref byte* ptr, byte* end)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static bool ReadStringArrayResponseWithLengthHeader(out string[] result, ref byte* ptr, byte* end)
         {
             result = null;
+
             // Parse RESP array header
-            if (!ReadArrayLength(out var length, ref ptr, end))
+            if (!ReadSignedArrayLength(out var length, ref ptr, end))
             {
                 return false;
             }
@@ -783,17 +830,22 @@ namespace Garnet.common
             }
 
             // Parse individual strings in the array
-            result = new MemoryResult<byte>[length];
+            result = new string[length];
             for (var i = 0; i < length; i++)
             {
                 if (*ptr == '$')
                 {
-                    if (!ReadStringWithLengthHeader(pool, out result[i], ref ptr, end))
+                    if (!ReadStringWithLengthHeader(out result[i], ref ptr, end))
+                        return false;
+                }
+                else if (*ptr == '+')
+                {
+                    if (!ReadSimpleString(out result[i], ref ptr, end))
                         return false;
                 }
                 else
                 {
-                    if (!ReadIntegerAsString(pool, out result[i], ref ptr, end))
+                    if (!ReadIntegerAsString(out result[i], ref ptr, end))
                         return false;
                 }
             }
@@ -806,7 +858,7 @@ namespace Garnet.common
         /// </summary>
         public static bool ReadDoubleWithLengthHeader(out double result, out bool parsed, ref byte* ptr, byte* end)
         {
-            if (!ReadByteArrayWithLengthHeader(out var resultBytes, ref ptr, end))
+            if (!TrySliceWithLengthHeader(out var resultBytes, ref ptr, end))
             {
                 result = 0;
                 parsed = false;
@@ -815,42 +867,6 @@ namespace Garnet.common
 
             parsed = Utf8Parser.TryParse(resultBytes, out result, out var bytesConsumed, default) &&
                 bytesConsumed == resultBytes.Length;
-            return true;
-        }
-
-        /// <summary>
-        /// Read Span of byte with length header
-        /// </summary>
-        public static bool ReadSpanByteWithLengthHeader(ref Span<byte> result, ref byte* ptr, byte* end)
-        {
-            // Parse RESP string header
-            if (!ReadLengthHeader(out var len, ref ptr, end))
-            {
-                return false;
-            }
-
-            if (len < 0)
-            {
-                // NULL value ('$-1\r\n')
-                result = null;
-                return true;
-            }
-
-            var keyPtr = ptr;
-
-            // Parse content: ensure that input contains key + '\r\n'
-            ptr += len + 2;
-            if (ptr > end)
-            {
-                return false;
-            }
-
-            if (*(ushort*)(ptr - 2) != MemoryMarshal.Read<ushort>("\r\n"u8))
-            {
-                RespParsingException.ThrowUnexpectedToken(*(ptr - 2));
-            }
-
-            result = new Span<byte>(keyPtr, len);
             return true;
         }
 
@@ -867,7 +883,7 @@ namespace Garnet.common
         public static bool ReadPtrWithLengthHeader(ref byte* result, ref int len, ref byte* ptr, byte* end)
         {
             // Parse RESP string header
-            if (!ReadLengthHeader(out len, ref ptr, end))
+            if (!ReadUnsignedLengthHeader(out len, ref ptr, end))
             {
                 return false;
             }
@@ -892,7 +908,7 @@ namespace Garnet.common
         /// <summary>
         /// Read ASCII string without header until string terminator ('\r\n').
         /// </summary>
-        private static bool ReadString(out string result, ref byte* ptr, byte* end)
+        public static bool ReadString(out string result, ref byte* ptr, byte* end)
         {
             result = null;
 
@@ -906,31 +922,6 @@ namespace Garnet.common
                 if (*(ushort*)ptr == MemoryMarshal.Read<ushort>("\r\n"u8))
                 {
                     result = Encoding.UTF8.GetString(new ReadOnlySpan<byte>(start, (int)(ptr - start)));
-                    ptr += 2;
-                    return true;
-                }
-                ptr++;
-            }
-
-            return false;
-        }
-
-        /// <summary>
-        /// Read ASCII string without header until string terminator ('\r\n').
-        /// </summary>
-        private static bool ReadString(MemoryPool<byte> pool, out MemoryResult<byte> result, ref byte* ptr, byte* end)
-        {
-            result = default;
-            if (ptr + 1 >= end)
-                return false;
-
-            var start = ptr;
-            while (ptr < end - 1)
-            {
-                if (*(ushort*)ptr == MemoryMarshal.Read<ushort>("\r\n"u8))
-                {
-                    result = MemoryResult<byte>.Create(pool, (int)(ptr - start));
-                    new ReadOnlySpan<byte>(start, result.Length).CopyTo(result.Span);
                     ptr += 2;
                     return true;
                 }

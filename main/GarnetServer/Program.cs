@@ -2,9 +2,7 @@
 // Licensed under the MIT license.
 
 using System;
-using System.Collections.Generic;
 using System.Threading;
-using Garnet.common;
 using Garnet.server;
 
 namespace Garnet
@@ -14,8 +12,6 @@ namespace Garnet
     /// </summary>
     class Program
     {
-        private static string CustomRespCommandInfoJsonPath = "CustomRespCommandsInfo.json";
-
         static void Main(string[] args)
         {
             try
@@ -43,24 +39,45 @@ namespace Garnet
         /// </summary>
         static void RegisterExtensions(GarnetServer server)
         {
-            var customCommandsInfo = GetRespCommandsInfo(CustomRespCommandInfoJsonPath);
-
             // Register custom command on raw strings (SETIFPM = "set if prefix match")
-            server.Register.NewCommand("SETIFPM", 2, CommandType.ReadModifyWrite, new SetIfPMCustomCommand(), customCommandsInfo["SETIFPM"]);
+            // Add RESP command info to registration for command to appear when client runs COMMAND / COMMAND INFO
+            var setIfPmCmdInfo = new RespCommandsInfo
+            {
+                Name = "SETIFPM",
+                Arity = 4,
+                FirstKey = 1,
+                LastKey = 1,
+                Step = 1,
+                Flags = RespCommandFlags.DenyOom | RespCommandFlags.Write,
+                AclCategories = RespAclCategories.String | RespAclCategories.Write,
+            };
+            server.Register.NewCommand("SETIFPM", CommandType.ReadModifyWrite, new SetIfPMCustomCommand(), setIfPmCmdInfo);
 
             // Register custom command on raw strings (SETWPIFPGT = "set with prefix, if prefix greater than")
-            server.Register.NewCommand("SETWPIFPGT", 2, CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand(), customCommandsInfo["SETWPIFPGT"]);
+            server.Register.NewCommand("SETWPIFPGT", CommandType.ReadModifyWrite, new SetWPIFPGTCustomCommand());
 
             // Register custom command on raw strings (DELIFM = "delete if value matches")
-            server.Register.NewCommand("DELIFM", 1, CommandType.ReadModifyWrite, new DeleteIfMatchCustomCommand(), customCommandsInfo["DELIFM"]);
+            server.Register.NewCommand("DELIFM", CommandType.ReadModifyWrite, new DeleteIfMatchCustomCommand());
 
             // Register custom commands on objects
             var factory = new MyDictFactory();
-            server.Register.NewCommand("MYDICTSET", 2, CommandType.ReadModifyWrite, factory, customCommandsInfo["MYDICTSET"]);
-            server.Register.NewCommand("MYDICTGET", 1, CommandType.Read, factory, customCommandsInfo["MYDICTGET"]);
+            server.Register.NewType(factory);
+            server.Register.NewCommand("MYDICTSET", CommandType.ReadModifyWrite, factory, new MyDictSet(), new RespCommandsInfo { Arity = 4 });
+            server.Register.NewCommand("MYDICTGET", CommandType.Read, factory, new MyDictGet(), new RespCommandsInfo { Arity = 3 });
 
             // Register stored procedure to run a transactional command
-            server.Register.NewTransactionProc("READWRITETX", 3, () => new ReadWriteTxn());
+            // Add RESP command info to registration for command to appear when client runs COMMAND / COMMAND INFO
+            var readWriteTxCmdInfo = new RespCommandsInfo
+            {
+                Name = "READWRITETX",
+                Arity = 4,
+                FirstKey = 1,
+                LastKey = 3,
+                Step = 1,
+                Flags = RespCommandFlags.DenyOom | RespCommandFlags.Write,
+                AclCategories = RespAclCategories.Write,
+            };
+            server.Register.NewTransactionProc("READWRITETX", () => new ReadWriteTxn(), readWriteTxCmdInfo);
 
             // Register stored procedure to run a transactional command
             server.Register.NewTransactionProc("MSETPX", () => new MSetPxTxn());
@@ -69,19 +86,14 @@ namespace Garnet
             server.Register.NewTransactionProc("MGETIFPM", () => new MGetIfPM());
 
             // Register stored procedure to run a non-transactional command
-            server.Register.NewTransactionProc("GETTWOKEYSNOTXN", 2, () => new GetTwoKeysNoTxn());
+            server.Register.NewTransactionProc("GETTWOKEYSNOTXN", () => new GetTwoKeysNoTxn(), new RespCommandsInfo { Arity = 3 });
 
             // Register sample transactional procedures
-            server.Register.NewTransactionProc("SAMPLEUPDATETX", 8, () => new SampleUpdateTxn());
-            server.Register.NewTransactionProc("SAMPLEDELETETX", 5, () => new SampleDeleteTxn());
-        }
+            server.Register.NewTransactionProc("SAMPLEUPDATETX", () => new SampleUpdateTxn(), new RespCommandsInfo { Arity = 9 });
+            server.Register.NewTransactionProc("SAMPLEDELETETX", () => new SampleDeleteTxn(), new RespCommandsInfo { Arity = 6 });
 
-        private static IReadOnlyDictionary<string, RespCommandsInfo> GetRespCommandsInfo(string path)
-        {
-            var streamProvider = StreamProviderFactory.GetStreamProvider(FileLocationType.Local);
-            var commandsInfoProvider = RespCommandsInfoProviderFactory.GetRespCommandsInfoProvider();
-            commandsInfoProvider.TryImportRespCommandsInfo(path, streamProvider, out var commandsInfo);
-            return commandsInfo;
+            server.Register.NewProcedure("SUM", new Sum());
+            server.Register.NewProcedure("SETMAINANDOBJECT", new SetStringAndList());
         }
     }
 }

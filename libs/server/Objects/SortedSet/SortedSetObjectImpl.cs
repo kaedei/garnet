@@ -3,12 +3,9 @@
 
 using System;
 using System.Buffers;
-using System.Buffers.Text;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Globalization;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Text;
 using Garnet.common;
 using Tsavorite.core;
@@ -33,84 +30,76 @@ namespace Garnet.server
             public bool WithScores { get; set; }
         };
 
-        private void SortedSetAdd(byte* input, int length, byte* output)
+        private void SortedSetAdd(ref ObjectInput input, byte* output)
         {
-            var _input = (ObjectInputHeader*)input;
             var _output = (ObjectOutputHeader*)output;
 
-            int count = _input->count;
+            var count = input.arg1;
             *_output = default;
 
-            byte* startptr = input + sizeof(ObjectInputHeader);
-            byte* ptr = startptr;
-            byte* end = input + length;
-            for (int c = 0; c < count; c++)
+            var input_startptr = input.payload.ptr;
+            var input_currptr = input_startptr;
+            var length = input.payload.length;
+            var input_endptr = input_startptr + length;
+
+            for (var c = 0; c < count; c++)
             {
-                if (!RespReadUtils.ReadDoubleWithLengthHeader(out var score, out var parsed, ref ptr, end))
+                if (!RespReadUtils.ReadDoubleWithLengthHeader(out var score, out var parsed, ref input_currptr, input_endptr))
                     return;
-                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var member, ref ptr, end))
+                if (!RespReadUtils.TrySliceWithLengthHeader(out var member, ref input_currptr, input_endptr))
                     return;
-
-                if (c < _input->done)
-                    continue;
-
-                _output->countDone++;
 
                 if (parsed)
                 {
-                    if (!sortedSetDict.TryGetValue(member, out var _scoreStored))
+                    var memberArray = member.ToArray();
+                    if (!sortedSetDict.TryGetValue(memberArray, out var scoreStored))
                     {
-                        _output->opsDone++;
-                        sortedSetDict.Add(member, score);
-                        sortedSet.Add((score, member));
+                        sortedSetDict.Add(memberArray, score);
+                        if (sortedSet.Add((score, memberArray)))
+                        {
+                            _output->result1++;
+                        }
 
                         this.UpdateSize(member);
                     }
-                    else if (_scoreStored != score)
+                    else if (scoreStored != score)
                     {
-                        sortedSetDict[member] = score;
-                        var success = sortedSet.Remove((_scoreStored, member));
+                        sortedSetDict[memberArray] = score;
+                        var success = sortedSet.Remove((scoreStored, memberArray));
                         Debug.Assert(success);
-                        success = sortedSet.Add((score, member));
+                        success = sortedSet.Add((score, memberArray));
                         Debug.Assert(success);
                     }
                 }
-                _output->bytesDone = (int)(ptr - startptr);
             }
         }
 
-        private void SortedSetRemove(byte* input, int length, byte* output)
+        private void SortedSetRemove(ref ObjectInput input, byte* output)
         {
-            var _input = (ObjectInputHeader*)input;
             var _output = (ObjectOutputHeader*)output;
 
-            int count = _input->count;
+            var count = input.arg1;
             *_output = default;
 
-            byte* startptr = input + sizeof(ObjectInputHeader);
-            byte* ptr = startptr;
-            byte* end = input + length;
+            var input_startptr = input.payload.ptr;
+            var input_currptr = input_startptr;
+            var length = input.payload.length;
+            var input_endptr = input_startptr + length;
 
-            for (int c = 0; c < count; c++)
+            for (var c = 0; c < count; c++)
             {
-                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var value, ref ptr, end))
+                if (!RespReadUtils.TrySliceWithLengthHeader(out var value, ref input_currptr, input_endptr))
                     return;
 
-                if (c < _input->done)
-                    continue;
-
-                _output->countDone++;
-
-                if (sortedSetDict.TryGetValue(value, out var _key))
+                var valueArray = value.ToArray();
+                if (sortedSetDict.TryGetValue(valueArray, out var key))
                 {
-                    _output->opsDone++;
-                    sortedSetDict.Remove(value);
-                    sortedSet.Remove((_key, value));
+                    _output->result1++;
+                    sortedSetDict.Remove(valueArray);
+                    sortedSet.Remove((key, valueArray));
 
                     this.UpdateSize(value, false);
                 }
-
-                _output->bytesDone = (int)(ptr - startptr);
             }
         }
 
@@ -118,28 +107,37 @@ namespace Garnet.server
         {
             // Check both objects
             Debug.Assert(sortedSetDict.Count == sortedSet.Count, "SortedSet object is not in sync.");
-            ((ObjectOutputHeader*)output)->opsDone = sortedSetDict.Count;
+            ((ObjectOutputHeader*)output)->result1 = sortedSetDict.Count;
         }
 
-        private void SortedSetPop(byte* input, ref SpanByteAndMemory output)
+        private void SortedSetPop(ref ObjectInput input, ref SpanByteAndMemory output)
         {
-            PopMinOrMaxCount(input, ref output, SortedSetOperation.ZPOPMAX);
+            PopMinOrMaxCount(ref input, ref output, SortedSetOperation.ZPOPMAX);
         }
 
-        private void SortedSetScore(byte* input, ref SpanByteAndMemory output)
+        private void SortedSetScore(ref ObjectInput input, ref SpanByteAndMemory output)
         {
-            //ZSCORE key member
-            var _input = (ObjectInputHeader*)input;
-            var scoreKey = new Span<byte>(input + sizeof(ObjectInputHeader), _input->count).ToArray();
+            // ZSCORE key member
+            var input_startptr = input.payload.ptr;
+            var input_currptr = input_startptr;
+            var length = input.payload.length;
+            var input_endptr = input_startptr + length;
 
-            bool isMemory = false;
+            var isMemory = false;
             MemoryHandle ptrHandle = default;
-            byte* ptr = output.SpanByte.ToPointer();
+            var ptr = output.SpanByte.ToPointer();
 
             var curr = ptr;
             var end = curr + output.Length;
 
-            ObjectOutputHeader _output = default;
+            byte* scorePtr = default;
+            var scoreLength = 0;
+            if (!RespReadUtils.ReadPtrWithLengthHeader(ref scorePtr, ref scoreLength, ref input_currptr, input_endptr))
+                return;
+
+            var scoreKey = new Span<byte>(scorePtr, scoreLength).ToArray();
+
+            ObjectOutputHeader outputHeader = default;
             try
             {
                 if (!sortedSetDict.TryGetValue(scoreKey, out var score))
@@ -149,16 +147,14 @@ namespace Garnet.server
                 }
                 else
                 {
-                    while (!RespWriteUtils.WriteAsciiBulkString(score.ToString(CultureInfo.InvariantCulture), ref curr, end))
+                    while (!RespWriteUtils.TryWriteDoubleBulkString(score, ref curr, end))
                         ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
                 }
-                _output.bytesDone = 0;
-                _output.countDone = 1;
-                _output.opsDone = 1;
+                outputHeader.result1 = 1;
             }
             finally
             {
-                while (!RespWriteUtils.WriteDirect(ref _output, ref curr, end))
+                while (!RespWriteUtils.WriteDirect(ref outputHeader, ref curr, end))
                     ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
 
                 if (isMemory) ptrHandle.Dispose();
@@ -166,24 +162,24 @@ namespace Garnet.server
             }
         }
 
-        private void SortedSetScores(byte* input, int length, ref SpanByteAndMemory output)
+        private void SortedSetScores(ref ObjectInput input, ref SpanByteAndMemory output)
         {
-            //ZMSCORE key member
-            var _input = (ObjectInputHeader*)input;
-            ObjectOutputHeader _output = default;
+            // ZMSCORE key member
+            var count = input.arg1;
 
-            int count = _input->count;
+            var input_startptr = input.payload.ptr;
+            var input_currptr = input_startptr;
+            var length = input.payload.length;
+            var input_endptr = input_startptr + length;
 
-            bool isMemory = false;
+            var isMemory = false;
             MemoryHandle ptrHandle = default;
+            var ptr = output.SpanByte.ToPointer();
 
-            byte* ptr = output.SpanByte.ToPointer();
             var curr = ptr;
             var end = curr + output.Length;
 
-            byte* input_startptr = input + sizeof(ObjectInputHeader);
-            byte* input_currptr = input_startptr;
-            byte* input_endptr = input + length;
+            ObjectOutputHeader outputHeader = default;
 
             try
             {
@@ -201,17 +197,15 @@ namespace Garnet.server
                     }
                     else
                     {
-                        while (!RespWriteUtils.WriteAsciiBulkString(score.ToString(CultureInfo.InvariantCulture), ref curr, end))
+                        while (!RespWriteUtils.TryWriteDoubleBulkString(score, ref curr, end))
                             ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
                     }
                 }
-                _output.bytesDone = (int)(input_currptr - input_startptr);
-                _output.countDone = count;
-                _output.opsDone = count;
+                outputHeader.result1 = count;
             }
             finally
             {
-                while (!RespWriteUtils.WriteDirect(ref _output, ref curr, end))
+                while (!RespWriteUtils.WriteDirect(ref outputHeader, ref curr, end))
                     ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
 
                 if (isMemory) ptrHandle.Dispose();
@@ -219,90 +213,84 @@ namespace Garnet.server
             }
         }
 
-        private void SortedSetCount(byte* input, int length, byte* output)
+        private void SortedSetCount(ref ObjectInput input, byte* output)
         {
-            var _input = (ObjectInputHeader*)input;
             var _output = (ObjectOutputHeader*)output;
             *_output = default;
 
-            byte* input_startptr = input + sizeof(ObjectInputHeader);
-            byte* input_currptr = input_startptr;
-            var end = input + length;
-            var count = 0;
-
-            _output->opsDone = 0;
-            _output->countDone = Int32.MinValue;
+            var input_startptr = input.payload.ptr;
+            var input_currptr = input_startptr;
+            var length = input.payload.length;
+            var input_endptr = input_startptr + length;
 
             // read min
-            if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var minParamByteArray, ref input_currptr, end))
+            if (!RespReadUtils.TrySliceWithLengthHeader(out var minParamSpan, ref input_currptr, input_endptr))
                 return;
 
             // read max
-            if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var maxParamByteArray, ref input_currptr, end))
+            if (!RespReadUtils.TrySliceWithLengthHeader(out var maxParamSpan, ref input_currptr, input_endptr))
                 return;
 
             //check if parameters are valid
-            if (!TryParseParameter(minParamByteArray, out var minValue, out var minExclusive) ||
-                !TryParseParameter(maxParamByteArray, out var maxValue, out var maxExclusive))
+            if (!TryParseParameter(minParamSpan, out var minValue, out var minExclusive) ||
+                !TryParseParameter(maxParamSpan, out var maxValue, out var maxExclusive))
             {
-                count = int.MaxValue;
+                _output->result1 = int.MaxValue;
+                return;
             }
-            else
+
+            // get the elements within the score range and write the result
+            var count = 0;
+            if (sortedSet.Count > 0)
             {
-                // get the elements within the score range and write the result
-                if (sortedSet.Count > 0)
+                foreach (var item in sortedSet.GetViewBetween((minValue, null), sortedSet.Max))
                 {
-                    foreach (var item in sortedSet.GetViewBetween((minValue, null), sortedSet.Max))
-                    {
-                        if (item.Item1 > maxValue || (maxExclusive && item.Item1 == maxValue)) break;
-                        if (minExclusive && item.Item1 == minValue) continue;
-                        _output->opsDone++;
-                    }
+                    if (item.Item1 > maxValue || (maxExclusive && item.Item1 == maxValue)) break;
+                    if (minExclusive && item.Item1 == minValue) continue;
+                    count++;
                 }
             }
-            _output->countDone = count;
-            _output->bytesDone = (int)(input_currptr - input_startptr);
+            _output->result1 = count;
         }
 
-        private void SortedSetIncrement(byte* input, int length, ref SpanByteAndMemory output)
+        private void SortedSetIncrement(ref ObjectInput input, ref SpanByteAndMemory output)
         {
-            //ZINCRBY key increment member
-            var _input = (ObjectInputHeader*)input;
-            int countDone = _input->count;
+            // ZINCRBY key increment member
+            var input_startptr = input.payload.ptr;
+            var input_currptr = input_startptr;
+            var length = input.payload.length;
+            var input_endptr = input_startptr + length;
 
-            byte* input_startptr = input + sizeof(ObjectInputHeader);
-            byte* input_currptr = input_startptr;
-
-            bool isMemory = false;
+            var isMemory = false;
             MemoryHandle ptrHandle = default;
-            byte* ptr = output.SpanByte.ToPointer();
+            var ptr = output.SpanByte.ToPointer();
 
             var curr = ptr;
             var end = curr + output.Length;
 
             ObjectOutputHeader _output = default;
 
-            //to validate partial execution
-            _output.countDone = int.MinValue;
+            // To validate partial execution
+            _output.result1 = int.MinValue;
             try
             {
                 // read increment
-                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var incrementByteArray, ref input_currptr, input + length))
+                if (!RespReadUtils.TrySliceWithLengthHeader(out var incrementBytes, ref input_currptr, input_endptr))
                     return;
 
                 // read member
-                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var memberByteArray, ref input_currptr, input + length))
+                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var memberByteArray, ref input_currptr, input_endptr))
                     return;
 
                 //check if increment value is valid
-                if (!Utf8Parser.TryParse(incrementByteArray, out double incrValue, out var incrBytesConsumed, default) ||
-                    incrBytesConsumed != incrementByteArray.Length)
+                int countDone;
+                if (!NumUtils.TryParse(incrementBytes, out double incrValue))
                 {
                     countDone = int.MaxValue;
                 }
                 else
                 {
-                    if (sortedSetDict.TryGetValue(memberByteArray, out double score))
+                    if (sortedSetDict.TryGetValue(memberByteArray, out var score))
                     {
                         sortedSetDict[memberByteArray] += incrValue;
                         sortedSet.Remove((score, memberByteArray));
@@ -317,14 +305,11 @@ namespace Garnet.server
                     }
 
                     // write the new score
-                    while (!RespWriteUtils.WriteAsciiBulkString(sortedSetDict[memberByteArray].ToString(CultureInfo.InvariantCulture), ref curr, end))
+                    while (!RespWriteUtils.TryWriteDoubleBulkString(sortedSetDict[memberByteArray], ref curr, end))
                         ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
                     countDone = 1;
                 }
-
-                // Write bytes parsed from input and count done, into output footer
-                _output.bytesDone = (int)(input_currptr - input_startptr);
-                _output.countDone = countDone;
+                _output.result1 = countDone;
             }
             finally
             {
@@ -336,24 +321,27 @@ namespace Garnet.server
             }
         }
 
-        private void SortedSetRank(byte* input, int length, byte* output)
+        private void SortedSetRank(ref ObjectInput input, ref SpanByteAndMemory output)
         {
-            GetRank(input, length, output);
+            GetRank(ref input, ref output);
         }
 
-        private void SortedSetRange(byte* input, int length, ref SpanByteAndMemory output)
+        private void SortedSetRange(ref ObjectInput input, ref SpanByteAndMemory output)
         {
             //ZRANGE key min max [BYSCORE|BYLEX] [REV] [LIMIT offset count] [WITHSCORES]
             //ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]
-            var _input = (ObjectInputHeader*)input;
-            int count = _input->count;
+            //ZREVRANGEBYSCORE key max min [WITHSCORES] [LIMIT offset count]
+            var count = input.arg1;
+            var respProtocolVersion = input.arg2;
 
-            byte* input_startptr = input + sizeof(ObjectInputHeader);
-            byte* input_currptr = input_startptr;
+            var input_startptr = input.payload.ptr;
+            var input_currptr = input_startptr;
+            var length = input.payload.length;
+            var input_endptr = input_startptr + length;
 
-            bool isMemory = false;
+            var isMemory = false;
             MemoryHandle ptrHandle = default;
-            byte* ptr = output.SpanByte.ToPointer();
+            var ptr = output.SpanByte.ToPointer();
 
             var curr = ptr;
             var end = curr + output.Length;
@@ -362,57 +350,65 @@ namespace Garnet.server
             try
             {
                 // read min
-                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var minParamByteArray, ref input_currptr, input + length))
+                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var minParamByteArray, ref input_currptr, input_endptr))
                     return;
 
                 // read max
-                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var maxParamByteArray, ref input_currptr, input + length))
+                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var maxParamByteArray, ref input_currptr, input_endptr))
                     return;
 
-                int countDone = 2;
+                var countDone = 2;
 
                 // read the rest of the arguments
                 ZRangeOptions options = new();
-                if (_input->header.SortedSetOp == SortedSetOperation.ZRANGEBYSCORE) options.ByScore = true;
-                if (_input->header.SortedSetOp == SortedSetOperation.ZREVRANGE) options.Reverse = true;
+                if (input.header.SortedSetOp == SortedSetOperation.ZRANGEBYSCORE) options.ByScore = true;
+                if (input.header.SortedSetOp == SortedSetOperation.ZREVRANGE) options.Reverse = true;
+                if (input.header.SortedSetOp == SortedSetOperation.ZREVRANGEBYSCORE)
+                {
+                    options.Reverse = true;
+                    options.ByScore = true;
+                }
 
                 if (count > 2)
                 {
                     int i = 0;
                     while (i < count - 2)
                     {
-                        if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var token, ref input_currptr, input + length))
+                        if (!RespReadUtils.TrySliceWithLengthHeader(out var token, ref input_currptr, input_startptr + length))
                             return;
-                        switch (Encoding.ASCII.GetString(token).ToUpperInvariant())
+
+                        if (token.EqualsUpperCaseSpanIgnoringCase("BYSCORE"u8))
                         {
-                            case "BYSCORE":
-                                options.ByScore = true;
-                                break;
-                            case "BYLEX":
-                                options.ByLex = true;
-                                break;
-                            case "REV":
-                                options.Reverse = true;
-                                break;
-                            case "LIMIT":
-                                // read the next two tokens
-                                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var offset, ref input_currptr, input + length))
-                                    return;
-                                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var countLimit, ref input_currptr, input + length))
-                                    return;
-                                if (TryParseParameter(offset, out var offsetLimit, out _) &&
-                                    TryParseParameter(countLimit, out var countLimitNumber, out _))
-                                {
-                                    options.Limit = ((int)offsetLimit, (int)countLimitNumber);
-                                    options.ValidLimit = true;
-                                    i += 2;
-                                }
-                                break;
-                            case "WITHSCORES":
-                                options.WithScores = true;
-                                break;
-                            default:
-                                break;
+                            options.ByScore = true;
+                        }
+                        else if (token.EqualsUpperCaseSpanIgnoringCase("BYLEX"u8))
+                        {
+                            options.ByLex = true;
+                        }
+                        else if (token.EqualsUpperCaseSpanIgnoringCase("REV"u8))
+                        {
+                            options.Reverse = true;
+                        }
+                        else if (token.EqualsUpperCaseSpanIgnoringCase("LIMIT"u8))
+                        {
+                            // read the next two tokens
+                            if (!RespReadUtils.TrySliceWithLengthHeader(out var offset, ref input_currptr, input_startptr + length) ||
+                                !RespReadUtils.TrySliceWithLengthHeader(out var countLimit, ref input_currptr, input_startptr + length))
+                            {
+                                return;
+                            }
+
+                            if (TryParseParameter(offset, out var offsetLimit, out _) &&
+                                TryParseParameter(countLimit, out var countLimitNumber, out _))
+                            {
+                                options.Limit = ((int)offsetLimit, (int)countLimitNumber);
+                                options.ValidLimit = true;
+                                i += 2;
+                            }
+                        }
+                        else if (token.EqualsUpperCaseSpanIgnoringCase("WITHSCORES"u8))
+                        {
+                            options.WithScores = true;
                         }
                         i++;
                     }
@@ -425,30 +421,16 @@ namespace Garnet.server
                     {
                         while (!RespWriteUtils.WriteError("ERR max or min value is not a float value."u8, ref curr, end))
                             ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                        countDone = _input->count;
+                        countDone = input.arg1;
                         count = 0;
                     }
 
                     if (options.ByScore)
                     {
-
                         var scoredElements = GetElementsInRangeByScore(minValue, maxValue, minExclusive, maxExclusive, options.WithScores, options.Reverse, options.ValidLimit, false, options.Limit);
 
-                        // write the size of the array reply
-                        while (!RespWriteUtils.WriteArrayLength(options.WithScores ? scoredElements.Count * 2 : scoredElements.Count, ref curr, end))
-                            ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-
-                        foreach (var item in scoredElements)
-                        {
-                            while (!RespWriteUtils.WriteBulkString(item.Item2, ref curr, end))
-                                ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                            if (options.WithScores)
-                            {
-                                while (!RespWriteUtils.WriteAsciiBulkString(item.Item1.ToString(CultureInfo.InvariantCulture), ref curr, end))
-                                    ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                            }
-                        }
-                        countDone = _input->count;
+                        WriteSortedSetResult(options.WithScores, scoredElements.Count, respProtocolVersion, scoredElements, ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+                        countDone = input.arg1;
                     }
                     else
                     {  // byIndex
@@ -457,7 +439,7 @@ namespace Garnet.server
                         {
                             while (!RespWriteUtils.WriteError("ERR syntax error, LIMIT is only supported in BYSCORE or BYLEX."u8, ref curr, end))
                                 ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                            countDone = _input->count;
+                            countDone = input.arg1;
                             count = 0;
                         }
                         else if (minValue > sortedSetDict.Count - 1)
@@ -465,7 +447,7 @@ namespace Garnet.server
                             // return empty list
                             while (!RespWriteUtils.WriteEmptyArray(ref curr, end))
                                 ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                            countDone = _input->count;
+                            countDone = input.arg1;
                             count = 0;
                         }
                         else
@@ -484,27 +466,27 @@ namespace Garnet.server
                                 maxIndex = sortedSetDict.Count - 1;
                             }
 
-                            // calculate number of elements
-                            int n = maxIndex - minIndex + 1;
-
-                            var iterator = options.Reverse ? sortedSet.Reverse() : sortedSet;
-                            iterator = iterator.Skip(minIndex).Take(n);
-
-                            // write the size of the array reply
-                            while (!RespWriteUtils.WriteArrayLength(options.WithScores ? n * 2 : n, ref curr, end))
-                                ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-
-                            foreach (var item in iterator)
+                            // No elements to return if both indexes fall outside the range or min is higher than max
+                            if ((minIndex < 0 && maxIndex < 0) || (minIndex > maxIndex))
                             {
-                                while (!RespWriteUtils.WriteBulkString(item.Item2, ref curr, end))
+                                while (!RespWriteUtils.WriteEmptyArray(ref curr, end))
                                     ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                                if (options.WithScores)
-                                {
-                                    while (!RespWriteUtils.WriteAsciiBulkString(item.Item1.ToString(CultureInfo.InvariantCulture), ref curr, end))
-                                        ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                                }
+                                countDone = input.arg1;
+                                count = 0;
                             }
-                            countDone = _input->count;
+                            else
+                            {
+                                // Clamp minIndex to 0, if it is beyond the number of elements
+                                minIndex = Math.Max(0, minIndex);
+
+                                // calculate number of elements
+                                int n = maxIndex - minIndex + 1;
+                                var iterator = options.Reverse ? sortedSet.Reverse() : sortedSet;
+                                iterator = iterator.Skip(minIndex).Take(n);
+
+                                WriteSortedSetResult(options.WithScores, n, respProtocolVersion, iterator, ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+                                countDone = input.arg1;
+                            }
                         }
                     }
                 }
@@ -518,32 +500,16 @@ namespace Garnet.server
                     {
                         while (!RespWriteUtils.WriteError("ERR max or min value not valid string range."u8, ref curr, end))
                             ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                        countDone = _input->count;
+                        countDone = input.arg1;
                         count = 0;
                     }
                     else
                     {
-                        //write the size of the array reply
-                        while (!RespWriteUtils.WriteArrayLength(options.WithScores ? elementsInLex.Count * 2 : elementsInLex.Count, ref curr, end))
-                            ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-
-                        foreach (var item in elementsInLex)
-                        {
-                            while (!RespWriteUtils.WriteBulkString(item.Item2, ref curr, end))
-                                ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                            if (options.WithScores)
-                            {
-                                while (!RespWriteUtils.WriteAsciiBulkString(item.Item1.ToString(CultureInfo.InvariantCulture), ref curr, end))
-                                    ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                            }
-                        }
-                        countDone = _input->count;
+                        WriteSortedSetResult(options.WithScores, elementsInLex.Count, respProtocolVersion, elementsInLex, ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+                        countDone = input.arg1;
                     }
                 }
-
-                // Write bytes parsed from input and count done, into output footer
-                _output.bytesDone = (int)(input_currptr - input_startptr);
-                _output.countDone = countDone;
+                _output.result1 = countDone;
             }
             finally
             {
@@ -555,68 +521,99 @@ namespace Garnet.server
             }
         }
 
-        private void SortedSetRangeByScore(byte* input, int length, ref SpanByteAndMemory output)
+        void WriteSortedSetResult(bool withScores, int count, int respProtocolVersion, IEnumerable<(double, byte[])> iterator, ref SpanByteAndMemory output, ref bool isMemory, ref byte* ptr, ref MemoryHandle ptrHandle, ref byte* curr, ref byte* end)
         {
-            SortedSetRange(input, length, ref output);
+            if (withScores && respProtocolVersion >= 3)
+            {
+                // write the size of the array reply
+                while (!RespWriteUtils.WriteArrayLength(count, ref curr, end))
+                    ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+
+                foreach (var (score, element) in iterator)
+                {
+                    while (!RespWriteUtils.WriteArrayLength(2, ref curr, end))
+                        ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+
+                    while (!RespWriteUtils.WriteBulkString(element, ref curr, end))
+                        ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+                    while (!RespWriteUtils.TryWriteDoubleNumeric(score, ref curr, end))
+                        ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+                }
+            }
+            else
+            {
+                // write the size of the array reply
+                while (!RespWriteUtils.WriteArrayLength(withScores ? count * 2 : count, ref curr, end))
+                    ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+
+                foreach (var (score, element) in iterator)
+                {
+                    while (!RespWriteUtils.WriteBulkString(element, ref curr, end))
+                        ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+                    if (withScores)
+                    {
+                        while (!RespWriteUtils.TryWriteDoubleBulkString(score, ref curr, end))
+                            ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+                    }
+                }
+            }
         }
 
-        private void SortedSetReverseRange(byte* input, int length, ref SpanByteAndMemory output)
+        private void SortedSetRangeByScore(ref ObjectInput input, ref SpanByteAndMemory output)
         {
-            SortedSetRange(input, length, ref output);
+            SortedSetRange(ref input, ref output);
         }
 
-        private void SortedSetReverseRank(byte* input, int length, byte* output)
+        private void SortedSetReverseRange(ref ObjectInput input, ref SpanByteAndMemory output)
         {
-            GetRank(input, length, output, ascending: false);
+            SortedSetRange(ref input, ref output);
         }
 
-        private void SortedSetRemoveRangeByLex(byte* input, int length, byte* output)
+        private void SortedSetReverseRank(ref ObjectInput input, ref SpanByteAndMemory output)
         {
-            GetRangeOrCountByLex(input, length, output, SortedSetOperation.ZREMRANGEBYLEX);
+            GetRank(ref input, ref output, ascending: false);
         }
 
-        private void SortedSetRemoveRangeByRank(byte* input, int length, byte* output)
+        private void SortedSetRemoveRangeByLex(ref ObjectInput input, byte* output)
         {
-            //ZREMRANGEBYRANK key start stop
-            var _input = (ObjectInputHeader*)input;
+            GetRangeOrCountByLex(ref input, output, SortedSetOperation.ZREMRANGEBYLEX);
+        }
+
+        private void SortedSetRemoveRangeByRank(ref ObjectInput input, byte* output)
+        {
+            // ZREMRANGEBYRANK key start stop
             var _output = (ObjectOutputHeader*)output;
 
-            int count = _input->count;
-            *_output = default;
+            var input_startptr = input.payload.ptr;
+            var input_currptr = input_startptr;
+            var length = input.payload.length;
+            var input_endptr = input_startptr + length;
 
-            //using minValue for partial execution detection
-            _output->countDone = int.MinValue;
+            // Using minValue for partial execution detection
+            _output->result1 = int.MinValue;
 
-            byte* input_startptr = input + sizeof(ObjectInputHeader);
-            byte* input_currptr = input_startptr;
-
-            byte* startParam = null;
-            int pstartsize = 0;
-
-            byte* stopParam = null;
-            int pstopsize = 0;
-
-            if (!RespReadUtils.ReadPtrWithLengthHeader(ref startParam, ref pstartsize, ref input_currptr, input + length))
-                return;
-
-            if (!RespReadUtils.ReadPtrWithLengthHeader(ref stopParam, ref pstopsize, ref input_currptr, input + length))
-                return;
-
-            _output->bytesDone = (int)(input_currptr - input_startptr);
-            _output->countDone = int.MaxValue;
-
-            if (!NumUtils.TryBytesToInt(startParam, pstartsize, out int start) || !NumUtils.TryBytesToInt(stopParam, pstopsize, out int stop))
-                return;
-
-            _output->countDone = 0;
-
-            if (start > sortedSetDict.Count - 1)
+            if (!RespReadUtils.TrySliceWithLengthHeader(out var startBytes, ref input_currptr, input_endptr) ||
+                !RespReadUtils.TrySliceWithLengthHeader(out var stopBytes, ref input_currptr, input_endptr))
             {
-                _output->opsDone = 0;
                 return;
             }
 
-            //shift from the end of the set
+            _output->result1 = int.MaxValue;
+
+            if (!NumUtils.TryParse(startBytes, out int start) ||
+                !NumUtils.TryParse(stopBytes, out int stop))
+            {
+                return;
+            }
+
+            _output->result1 = 0;
+
+            if (start > sortedSetDict.Count - 1)
+            {
+                return;
+            }
+
+            // Shift from the end of the set
             if (start < 0)
             {
                 start = sortedSetDict.Count + start;
@@ -630,83 +627,77 @@ namespace Garnet.server
                 stop = sortedSetDict.Count - 1;
             }
 
-            // calculate number of elements
-            _output->opsDone = stop - start + 1;
+            // Calculate number of elements
+            _output->result1 = stop - start + 1;
 
-            //using to list to avoid modified enumerator exception
+            // Using to list to avoid modified enumerator exception
             foreach (var item in sortedSet.Skip(start).Take(stop - start + 1).ToList())
             {
-                if (sortedSetDict.TryGetValue(item.Item2, out var _key))
+                if (sortedSetDict.Remove(item.Item2, out var key))
                 {
-                    sortedSetDict.Remove(item.Item2);
-                    sortedSet.Remove((_key, item.Item2));
+                    sortedSet.Remove((key, item.Item2));
 
                     this.UpdateSize(item.Item2, false);
                 }
             }
         }
 
-        private void SortedSetRemoveRangeByScore(byte* input, int length, byte* output)
+        private void SortedSetRemoveRangeByScore(ref ObjectInput input, byte* output)
         {
-            //ZREMRANGEBYSCORE key min max
-            var _input = (ObjectInputHeader*)input;
+            // ZREMRANGEBYSCORE key min max
             var _output = (ObjectOutputHeader*)output;
-
-            int count = _input->count;
             *_output = default;
 
-            byte* input_startptr = input + sizeof(ObjectInputHeader);
-            byte* input_currptr = input_startptr;
+            var input_startptr = input.payload.ptr;
+            var input_currptr = input_startptr;
+            var length = input.payload.length;
+            var input_endptr = input_startptr + length;
 
             // command could be partially executed
-            _output->countDone = int.MinValue;
+            _output->result1 = int.MinValue;
 
-            // read min
-            if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var minParamByteArray, ref input_currptr, input + length))
-                return;
-
-            // read max
-            if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var maxParamByteArray, ref input_currptr, input + length))
-                return;
-
-            if (!TryParseParameter(minParamByteArray, out var minValue, out var minExclusive) ||
-                !TryParseParameter(maxParamByteArray, out var maxValue, out var maxExclusive))
+            // read min and max
+            if (!RespReadUtils.TrySliceWithLengthHeader(out var minParamBytes, ref input_currptr, input_endptr) ||
+                !RespReadUtils.TrySliceWithLengthHeader(out var maxParamBytes, ref input_currptr, input_endptr))
             {
-                _output->countDone = int.MaxValue;
+                return;
+            }
+
+            if (!TryParseParameter(minParamBytes, out var minValue, out var minExclusive) ||
+                !TryParseParameter(maxParamBytes, out var maxValue, out var maxExclusive))
+            {
+                _output->result1 = int.MaxValue;
             }
             else
             {
                 var rem = GetElementsInRangeByScore(minValue, maxValue, minExclusive, maxExclusive, false, false, false, true);
-                _output->opsDone = rem.Count;
-                _output->countDone = 0;
+                _output->result1 = rem.Count;
             }
-            _output->bytesDone = (int)(input_currptr - input_startptr);
         }
 
-        private void SortedSetCountByLex(byte* input, int length, byte* output)
+        private void SortedSetCountByLex(ref ObjectInput input, byte* output)
         {
-            GetRangeOrCountByLex(input, length, output, SortedSetOperation.ZLEXCOUNT);
+            GetRangeOrCountByLex(ref input, output, SortedSetOperation.ZLEXCOUNT);
         }
 
-        private void SortedSetPopMin(byte* input, ref SpanByteAndMemory output)
+        private void SortedSetPopMin(ref ObjectInput input, ref SpanByteAndMemory output)
         {
-            PopMinOrMaxCount(input, ref output, SortedSetOperation.ZPOPMIN);
+            PopMinOrMaxCount(ref input, ref output, SortedSetOperation.ZPOPMIN);
         }
 
-        private void SortedSetRandomMember(byte* input, int length, ref SpanByteAndMemory output)
+        private void SortedSetRandomMember(ref ObjectInput input, ref SpanByteAndMemory output)
         {
-            var _input = (ObjectInputHeader*)input;
-
-            int count = _input->count;
-
-            bool withScores = _input->done == 1;
+            var count = input.arg1 >> 2;
+            var withScores = (input.arg1 & 1) == 1;
+            var includedCount = ((input.arg1 >> 1) & 1) == 1;
+            var seed = input.arg2;
 
             if (count > 0 && count > sortedSet.Count)
                 count = sortedSet.Count;
 
-            bool isMemory = false;
+            var isMemory = false;
             MemoryHandle ptrHandle = default;
-            byte* ptr = output.SpanByte.ToPointer();
+            var ptr = output.SpanByte.ToPointer();
 
             var curr = ptr;
             var end = curr + output.Length;
@@ -714,49 +705,32 @@ namespace Garnet.server
             ObjectOutputHeader _output = default;
             try
             {
+                // The count parameter can have a negative value, but the array length can't
                 var arrayLength = Math.Abs(withScores ? count * 2 : count);
-                if (arrayLength > 1)
+                if (arrayLength > 1 || (arrayLength == 1 && includedCount))
                 {
-                    // The count parameter can have a negative value, but the array length can't
                     while (!RespWriteUtils.WriteArrayLength(arrayLength, ref curr, end))
                         ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
                 }
 
-                int[] indexes = default;
-
-                if (count > 0)
-                {
-                    // The order of fields in the reply is not truly random
-                    indexes = new HashSet<int>(Enumerable.Range(0, sortedSetDict.Count).OrderBy(x => Guid.NewGuid()).Take(count)).ToArray();
-                }
-                else
-                {
-                    // Repeating fields are possible.
-                    // Exactly count fields, or an empty array is returned
-                    // The order of fields in the reply is truly random.
-                    indexes = new int[Math.Abs(count)];
-                    for (int i = 0; i < indexes.Length; i++)
-                        indexes[i] = RandomNumberGenerator.GetInt32(0, sortedSetDict.Count);
-                }
+                var indexes = RandomUtils.PickKRandomIndexes(sortedSetDict.Count, Math.Abs(count), seed, count > 0);
 
                 foreach (var item in indexes)
                 {
-                    var element = sortedSetDict.ElementAt(item);
+                    var (element, score) = sortedSetDict.ElementAt(item);
 
-                    while (!RespWriteUtils.WriteBulkString(element.Key, ref curr, end))
+                    while (!RespWriteUtils.WriteBulkString(element, ref curr, end))
                         ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
 
                     if (withScores)
                     {
-                        while (!RespWriteUtils.WriteAsciiBulkString(element.Value.ToString(CultureInfo.InvariantCulture), ref curr, end))
+                        while (!RespWriteUtils.TryWriteDoubleBulkString(score, ref curr, end))
                             ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
                     }
                 }
 
-                // Write bytes parsed from input and count done, into output footer
-                _output.bytesDone = 0;
-                _output.countDone = count;
-                _output.opsDone = count;
+                // Write count done into output footer
+                _output.result1 = count;
             }
             finally
             {
@@ -770,36 +744,33 @@ namespace Garnet.server
 
         #region CommonMethods
 
-        private void GetRangeOrCountByLex(byte* input, int length, byte* output, SortedSetOperation op)
+        private void GetRangeOrCountByLex(ref ObjectInput input, byte* output, SortedSetOperation op)
         {
             //ZREMRANGEBYLEX key min max
             //ZLEXCOUNT key min max
-            var _input = (ObjectInputHeader*)input;
             var _output = (ObjectOutputHeader*)output;
             *_output = default;
 
-            byte* input_startptr = input + sizeof(ObjectInputHeader);
-            byte* input_currptr = input_startptr;
-            var end = input + length;
+            var input_startptr = input.payload.ptr;
+            var input_currptr = input_startptr;
+            var length = input.payload.length;
+            var input_endptr = input_startptr + length;
 
-            _output->opsDone = 0;
+            // Using minValue for partial execution detection
+            _output->result1 = int.MinValue;
 
-            //using minValue for partial execution detection
-            _output->countDone = int.MinValue;
-
-            // read min
-            if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var minParamByteArray, ref input_currptr, end))
+            // read min and max
+            if (!RespReadUtils.TrySliceWithLengthHeader(out var minParamBytes, ref input_currptr, input_endptr) ||
+                !RespReadUtils.TrySliceWithLengthHeader(out var maxParamBytes, ref input_currptr, input_endptr))
+            {
                 return;
+            }
 
-            // read max
-            if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var maxParamByteArray, ref input_currptr, end))
-                return;
+            var rem = GetElementsInRangeByLex(minParamBytes, maxParamBytes, false, false, op != SortedSetOperation.ZLEXCOUNT, out int errorCode);
 
-            var rem = GetElementsInRangeByLex(minParamByteArray, maxParamByteArray, false, false, op != SortedSetOperation.ZLEXCOUNT, out int count);
-
-            _output->countDone = count;
-            _output->opsDone = rem.Count;
-            _output->bytesDone = (int)(input_currptr - input_startptr);
+            _output->result1 = errorCode;
+            if (errorCode == 0)
+                _output->result1 = rem.Count;
         }
 
         /// <summary>
@@ -807,34 +778,77 @@ namespace Garnet.server
         /// in ascending or descending order
         /// </summary>
         /// <param name="input"></param>
-        /// <param name="length"></param>
         /// <param name="output"></param>
         /// <param name="ascending"></param>
-        private void GetRank(byte* input, int length, byte* output, bool ascending = true)
+        private void GetRank(ref ObjectInput input, ref SpanByteAndMemory output, bool ascending = true)
         {
             //ZRANK key member
-            var _input = (ObjectInputHeader*)input;
-            var _output = (ObjectOutputHeader*)output;
+            var input_startptr = input.payload.ptr;
+            var input_currptr = input_startptr;
+            var length = input.payload.length;
+            var input_endptr = input_startptr + length;
 
-            var member = new Span<byte>(input + sizeof(ObjectInputHeader), _input->count).ToArray();
+            var isMemory = false;
+            MemoryHandle ptrHandle = default;
+            var ptr = output.SpanByte.ToPointer();
 
-            *_output = default;
+            var curr = ptr;
+            var end = curr + output.Length;
 
-            if (!sortedSetDict.TryGetValue(member, out var score))
+            var withScore = input.arg2 == 1;
+
+            ObjectOutputHeader _output = default;
+            try
             {
-                _output->opsDone = -1;
-                return;
-            }
-            else
-            {
-                var rank = 0;
-                foreach (var item in sortedSet)
+                if (!RespReadUtils.ReadByteArrayWithLengthHeader(out var member, ref input_currptr, input_endptr))
+                    return;
+
+                if (!sortedSetDict.TryGetValue(member, out var score))
                 {
-                    if (item.Item2.SequenceEqual(member))
-                        break;
-                    rank++;
+                    while (!RespWriteUtils.WriteNull(ref curr, end))
+                        ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
                 }
-                _output->opsDone = ascending ? rank : (sortedSet.Count - rank) - 1;
+                else
+                {
+                    var rank = 0;
+                    foreach (var item in sortedSet)
+                    {
+                        if (item.Item2.SequenceEqual(member))
+                            break;
+                        rank++;
+                    }
+
+                    if (!ascending)
+                        rank = sortedSet.Count - rank - 1;
+
+                    if (withScore)
+                    {
+                        while (!RespWriteUtils.WriteArrayLength(2, ref curr, end)) // rank and score
+                            ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+
+                        while (!RespWriteUtils.WriteInteger(rank, ref curr, end))
+                            ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+
+                        while (!RespWriteUtils.TryWriteDoubleBulkString(score, ref curr, end))
+                            ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+                    }
+                    else
+                    {
+                        while (!RespWriteUtils.WriteInteger(rank, ref curr, end))
+                            ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+                    }
+                }
+
+                _output.result1 = input.arg1;
+            }
+            finally
+            {
+                while (!RespWriteUtils.WriteDirect(ref _output, ref curr, end))
+                    ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
+
+                if (isMemory) ptrHandle.Dispose();
+
+                output.Length = (int)(curr - ptr);
             }
         }
 
@@ -849,7 +863,14 @@ namespace Garnet.server
         /// <param name="errorCode">errorCode</param>
         /// <param name="limit">offset and count values</param>
         /// <returns></returns>
-        private List<(double, byte[])> GetElementsInRangeByLex(byte[] minParamByteArray, byte[] maxParamByteArray, bool doReverse, bool validLimit, bool rem, out int errorCode, (int, int) limit = default)
+        private List<(double, byte[])> GetElementsInRangeByLex(
+            ReadOnlySpan<byte> minParamByteArray,
+            ReadOnlySpan<byte> maxParamByteArray,
+            bool doReverse,
+            bool validLimit,
+            bool rem,
+            out int errorCode,
+            (int, int) limit = default)
         {
             var elementsInLex = new List<(double, byte[])>();
 
@@ -863,6 +884,13 @@ namespace Garnet.server
 
             try
             {
+                if (doReverse)
+                {
+                    var tmpMinValueChars = minValueChars;
+                    minValueChars = maxValueChars;
+                    maxValueChars = tmpMinValueChars;
+                }
+
                 var iterator = sortedSet.GetViewBetween((sortedSet.Min.Item1, minValueChars.ToArray()), sortedSet.Max);
 
                 // using ToList method so we avoid the Invalid operation ex. when removing
@@ -872,7 +900,7 @@ namespace Garnet.server
                     if (inRange < 0 || (inRange == 0 && minValueExclusive))
                         continue;
 
-                    var outRange = maxValueChars == default ? -1 : new ReadOnlySpan<byte>(item.Item2).SequenceCompareTo(maxValueChars);
+                    var outRange = maxValueChars.IsEmpty ? -1 : new ReadOnlySpan<byte>(item.Item2).SequenceCompareTo(maxValueChars);
                     if (outRange > 0 || (outRange == 0 && maxValueExclusive))
                         break;
 
@@ -925,6 +953,11 @@ namespace Garnet.server
         /// <returns></returns>
         private List<(double, byte[])> GetElementsInRangeByScore(double minValue, double maxValue, bool minExclusive, bool maxExclusive, bool withScore, bool doReverse, bool validLimit, bool rem, (int, int) limit = default)
         {
+            if (doReverse)
+            {
+                (minValue, maxValue) = (maxValue, minValue);
+            }
+
             List<(double, byte[])> scoredElements = new();
             if (sortedSet.Max.Item1 < minValue)
             {
@@ -970,67 +1003,51 @@ namespace Garnet.server
         /// <param name="input"></param>
         /// <param name="output"></param>
         /// <param name="op"></param>
-        private void PopMinOrMaxCount(byte* input, ref SpanByteAndMemory output, SortedSetOperation op)
+        private void PopMinOrMaxCount(ref ObjectInput input, ref SpanByteAndMemory output, SortedSetOperation op)
         {
-            var _input = (ObjectInputHeader*)input;
-            int count = _input->count;
-            int prevDone = _input->done; // how many were previously done
-            int countDone = 0;
-
-            int totalLen = 0;
+            var count = input.arg1;
+            var countDone = 0;
 
             if (sortedSet.Count < count)
                 count = sortedSet.Count;
 
-            bool isMemory = false;
+            var isMemory = false;
             MemoryHandle ptrHandle = default;
-            byte* ptr = output.SpanByte.ToPointer();
+            var ptr = output.SpanByte.ToPointer();
 
             var curr = ptr;
             var end = curr + output.Length;
 
-            ObjectOutputHeader _output = default;
-            var inputCount = count;
+            ObjectOutputHeader outputHeader = default;
 
             try
             {
                 while (!RespWriteUtils.WriteArrayLength(count * 2, ref curr, end))
                     ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
-                totalLen = (int)(curr - ptr);
 
                 while (count > 0)
                 {
-                    if (countDone < prevDone) // skip processing previously done entries
-                    {
-                        countDone++;
-                        count--;
-                        continue;
-                    }
                     var max = op == SortedSetOperation.ZPOPMAX ? sortedSet.Max : sortedSet.Min;
-                    var success = sortedSet.Remove(max);
-                    success = sortedSetDict.Remove(max.Item2);
+                    sortedSet.Remove(max);
+                    sortedSetDict.Remove(max.Element);
 
-                    this.UpdateSize(max.Item2, false);
+                    this.UpdateSize(max.Element, false);
 
-                    while (!RespWriteUtils.WriteBulkString(max.Item2, ref curr, end))
+                    while (!RespWriteUtils.WriteBulkString(max.Element, ref curr, end))
                         ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
 
-                    while (!RespWriteUtils.WriteAsciiBulkString(max.Item1.ToString(CultureInfo.InvariantCulture), ref curr, end))
+                    while (!RespWriteUtils.TryWriteDoubleBulkString(max.Score, ref curr, end))
                         ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
 
                     countDone++;
                     count--;
                 }
 
-                // Write output
-                _output.bytesDone = 0; // No reads done
-                _output.countDone = countDone;
-                // how many can be done based on the lenght of the SS
-                _output.opsDone = inputCount;
+                outputHeader.result1 = countDone;
             }
             finally
             {
-                while (!RespWriteUtils.WriteDirect(ref _output, ref curr, end))
+                while (!RespWriteUtils.WriteDirect(ref outputHeader, ref curr, end))
                     ObjectUtils.ReallocateOutput(ref output, ref isMemory, ref ptr, ref ptrHandle, ref curr, ref end);
 
                 if (isMemory) ptrHandle.Dispose();
@@ -1057,8 +1074,7 @@ namespace Garnet.server
                 exclusive = true;
             }
 
-            if (Utf8Parser.TryParse(val, out valueDouble, out int bytesConsumed, default) &&
-                bytesConsumed == val.Length)
+            if (NumUtils.TryParse(val, out valueDouble))
             {
                 return true;
             }

@@ -94,7 +94,8 @@ namespace Garnet.server
 
             try
             {
-                var respCommands = JsonSerializer.Deserialize<RespCommandsInfo[]>(streamReader.ReadToEnd(), SerializerOptions)!;
+                string respJson = streamReader.ReadToEnd();
+                var respCommands = JsonSerializer.Deserialize<RespCommandsInfo[]>(respJson, SerializerOptions)!;
 
                 var tmpRespCommandsInfo = new Dictionary<string, RespCommandsInfo>(StringComparer.OrdinalIgnoreCase);
                 foreach (var respCommandsInfo in respCommands)
@@ -106,7 +107,7 @@ namespace Garnet.server
             }
             catch (JsonException je)
             {
-                logger?.LogError(je, $"An error occurred while parsing resp commands info file (Path: {path}).");
+                logger?.LogError(je, "An error occurred while parsing resp commands info file (Path: {path}).", path);
                 return false;
             }
 
@@ -124,7 +125,7 @@ namespace Garnet.server
             }
             catch (NotSupportedException e)
             {
-                logger?.LogError(e, $"An error occurred while serializing resp commands info file (Path: {path}).");
+                logger?.LogError(e, "An error occurred while serializing resp commands info file (Path: {path}).", path);
                 return false;
             }
 

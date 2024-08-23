@@ -37,7 +37,7 @@ namespace CommandInfoUpdater
                 new Dictionary<string, RespCommandsInfo>();
             if (!force && !RespCommandsInfo.TryGetRespCommandsInfo(out existingCommandsInfo, false, logger))
             {
-                logger.LogError($"Unable to get existing RESP commands info.");
+                logger.LogError("Unable to get existing RESP commands info.");
                 return false;
             }
 
@@ -46,19 +46,19 @@ namespace CommandInfoUpdater
 
             if (!GetUserConfirmation(commandsToAdd, commandsToRemove, logger))
             {
-                logger.LogInformation($"User cancelled update operation.");
+                logger.LogInformation("User cancelled update operation.");
                 return false;
             }
 
             if (!TryGetRespCommandsInfo(GarnetCommandInfoJsonPath, logger, out var garnetCommandsInfo) ||
                 garnetCommandsInfo == null)
             {
-                logger.LogError($"Unable to read Garnet RESP commands info from {GarnetCommandInfoJsonPath}.");
+                logger.LogError("Unable to read Garnet RESP commands info from {GarnetCommandInfoJsonPath}.", GarnetCommandInfoJsonPath);
                 return false;
             }
 
-            IDictionary<string, RespCommandsInfo> queriedCommandsInfo = default;
-            var commandsToQuery = commandsToAdd.Select(c => c.Key.Command).Except(garnetCommandsInfo.Keys).ToArray();
+            IDictionary<string, RespCommandsInfo> queriedCommandsInfo = new Dictionary<string, RespCommandsInfo>();
+            var commandsToQuery = commandsToAdd.Keys.Select(k => k.Command).ToArray();
             if (commandsToQuery.Length > 0 && !TryGetCommandsInfo(commandsToQuery, respServerPort, respServerHost,
                     logger, out queriedCommandsInfo))
             {
@@ -66,22 +66,43 @@ namespace CommandInfoUpdater
                 return false;
             }
 
-            IDictionary<string, RespCommandsInfo> additionalCommandsInfo = (queriedCommandsInfo == null
-                    ? garnetCommandsInfo
-                    : queriedCommandsInfo.UnionBy(garnetCommandsInfo, kvp => kvp.Key))
-                .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+            var additionalCommandsInfo = new Dictionary<string, RespCommandsInfo>();
+            foreach (var cmd in garnetCommandsInfo.Keys.Union(queriedCommandsInfo.Keys))
+            {
+                if (!additionalCommandsInfo.ContainsKey(cmd))
+                {
+                    var baseCommandInfo = queriedCommandsInfo.ContainsKey(cmd)
+                        ? queriedCommandsInfo[cmd]
+                        : garnetCommandsInfo[cmd];
+                    additionalCommandsInfo.Add(cmd, new RespCommandsInfo()
+                    {
+                        Command = baseCommandInfo.Command,
+                        Name = baseCommandInfo.Name,
+                        Arity = baseCommandInfo.Arity,
+                        Flags = baseCommandInfo.Flags,
+                        FirstKey = baseCommandInfo.FirstKey,
+                        LastKey = baseCommandInfo.LastKey,
+                        Step = baseCommandInfo.Step,
+                        AclCategories = baseCommandInfo.AclCategories,
+                        Tips = baseCommandInfo.Tips,
+                        KeySpecifications = baseCommandInfo.KeySpecifications,
+                        SubCommands = queriedCommandsInfo.ContainsKey(cmd) && garnetCommandsInfo.ContainsKey(cmd) ?
+                            queriedCommandsInfo[cmd].SubCommands.Union(garnetCommandsInfo[cmd].SubCommands).ToArray() :
+                            baseCommandInfo.SubCommands
+                    });
+                }
+            }
 
             var updatedCommandsInfo = GetUpdatedCommandsInfo(existingCommandsInfo, commandsToAdd, commandsToRemove,
                 additionalCommandsInfo);
 
             if (!TryWriteRespCommandsInfo(outputPath, updatedCommandsInfo, logger))
             {
-                logger.LogError($"Unable to write RESP commands info to path {outputPath}.");
+                logger.LogError("Unable to write RESP commands info to path {outputPath}.", outputPath);
                 return false;
             }
 
-            logger.LogInformation(
-                $"RESP commands info updated successfully! Output file written to: {Path.GetFullPath(outputPath)}");
+            logger.LogInformation("RESP commands info updated successfully! Output file written to: {fullOutputPath}", Path.GetFullPath(outputPath));
             return true;
         }
 
@@ -145,7 +166,7 @@ namespace CommandInfoUpdater
                 // If existing commands contain parent command and have no sub-commands, set sub-commands to add as supported command's sub-commands
                 if (existingCommandsInfo[supportedCommand.Command].SubCommands == null)
                 {
-                    subCommandsToAdd = supportedCommand.SubCommands.ToArray();
+                    subCommandsToAdd = [.. supportedCommand.SubCommands];
                 }
                 // Set sub-commands to add as the difference between existing sub-commands and supported command's sub-commands
                 else
@@ -162,8 +183,7 @@ namespace CommandInfoUpdater
                 if (subCommandsToAdd.Length > 0)
                 {
                     commandsToAdd.Add(
-                        new SupportedCommand(supportedCommand.Command, supportedCommand.RespCommand,
-                            supportedCommand.ArrayCommand, subCommandsToAdd), false);
+                        new SupportedCommand(supportedCommand.Command, supportedCommand.RespCommand, subCommandsToAdd), false);
                 }
             }
 
@@ -195,8 +215,7 @@ namespace CommandInfoUpdater
                 if (subCommandsToRemove.Length > 0)
                 {
                     commandsToRemove.Add(
-                        new SupportedCommand(existingCommand.Key, existingCommand.Value.Command,
-                            existingCommand.Value.ArrayCommand, subCommandsToRemove), false);
+                        new SupportedCommand(existingCommand.Key, existingCommand.Value.Command, subCommandsToRemove), false);
                 }
             }
 
@@ -220,18 +239,16 @@ namespace CommandInfoUpdater
             var logSubCommandsToRemove = commandsToRemove.Where(c => c.Key.SubCommands != null)
                 .SelectMany(c => c.Key.SubCommands!).ToList();
 
-            logger.LogInformation(
-                $"Found {logCommandsToAdd.Count} commands to add and {logSubCommandsToAdd.Count} sub-commands to add.");
+            logger.LogInformation("Found {logCommandsToAddCount} commands to add and {logSubCommandsToAddCount} sub-commands to add.", logCommandsToAdd.Count, logSubCommandsToAdd.Count);
             if (logCommandsToAdd.Count > 0)
-                logger.LogInformation($"Commands to add: {string.Join(", ", logCommandsToAdd)}");
+                logger.LogInformation("Commands to add: {commands}", string.Join(", ", logCommandsToAdd));
             if (logSubCommandsToAdd.Count > 0)
-                logger.LogInformation($"Sub-Commands to add: {string.Join(", ", logSubCommandsToAdd)}");
-            logger.LogInformation(
-                $"Found {logCommandsToRemove.Count} commands to remove and {logSubCommandsToRemove.Count} sub-commands to commandsToRemove.");
+                logger.LogInformation("Sub-Commands to add: {commands}", string.Join(", ", logSubCommandsToAdd));
+            logger.LogInformation("Found {logCommandsToRemoveCount} commands to remove and {logSubCommandsToRemoveCount} sub-commands to commandsToRemove.", logCommandsToRemove.Count, logSubCommandsToRemove.Count);
             if (logCommandsToRemove.Count > 0)
-                logger.LogInformation($"Commands to remove: {string.Join(", ", logCommandsToRemove)}");
+                logger.LogInformation("Commands to remove: {commands}", string.Join(", ", logCommandsToRemove));
             if (logSubCommandsToRemove.Count > 0)
-                logger.LogInformation($"Sub-Commands to remove: {string.Join(", ", logSubCommandsToRemove)}");
+                logger.LogInformation("Sub-Commands to remove: {commands}", string.Join(", ", logSubCommandsToRemove));
 
             if (logCommandsToAdd.Count == 0 && logSubCommandsToAdd.Count == 0 && logCommandsToRemove.Count == 0 &&
                 logSubCommandsToRemove.Count == 0)
@@ -293,9 +310,9 @@ namespace CommandInfoUpdater
             var tmpCommandsInfo = new Dictionary<string, RespCommandsInfo>();
 
             // Get a map of supported commands to Garnet's RespCommand & ArrayCommand for the parser
-            var supportedCommands = new ReadOnlyDictionary<string, (RespCommand, byte?)>(
+            var supportedCommands = new ReadOnlyDictionary<string, RespCommand>(
                 SupportedCommand.SupportedCommandsMap.ToDictionary(kvp => kvp.Key,
-                    kvp => (kvp.Value.RespCommand, kvp.Value.ArrayCommand), StringComparer.OrdinalIgnoreCase));
+                    kvp => kvp.Value.RespCommand, StringComparer.OrdinalIgnoreCase));
 
             // Parse the response
             fixed (byte* respPtr = response)
@@ -304,9 +321,9 @@ namespace CommandInfoUpdater
                 var end = ptr + response.Length;
 
                 // Read the array length (# of commands info returned)
-                if (!RespReadUtils.ReadArrayLength(out var cmdCount, ref ptr, end))
+                if (!RespReadUtils.ReadUnsignedArrayLength(out var cmdCount, ref ptr, end))
                 {
-                    logger.LogError($"Unable to read RESP command info count from server");
+                    logger.LogError("Unable to read RESP command info count from server");
                     return false;
                 }
 
@@ -316,8 +333,7 @@ namespace CommandInfoUpdater
                     if (!RespCommandInfoParser.TryReadFromResp(ref ptr, end, supportedCommands, out var command) ||
                         command == null)
                     {
-                        logger.LogError(
-                            $"Unable to read RESP command info from server for command {commandsToQuery[cmdIdx]}");
+                        logger.LogError("Unable to read RESP command info from server for command {command}", commandsToQuery[cmdIdx]);
                         return false;
                     }
 
@@ -369,7 +385,6 @@ namespace CommandInfoUpdater
                 var updatedCommand = new RespCommandsInfo
                 {
                     Command = existingCommand.Command,
-                    ArrayCommand = existingCommand.ArrayCommand,
                     Name = existingCommand.Name,
                     Arity = existingCommand.Arity,
                     Flags = existingCommand.Flags,
@@ -397,7 +412,7 @@ namespace CommandInfoUpdater
                 {
                     updatedSubCommands = existingCommandsInfo[command.Command].SubCommands == null
                         ? new List<RespCommandsInfo>()
-                        : existingCommandsInfo[command.Command].SubCommands.ToList();
+                        : [.. existingCommandsInfo[command.Command].SubCommands];
 
                     // Add sub-commands with updated queried command info
                     foreach (var subCommandToAdd in command.SubCommands!)
@@ -425,7 +440,6 @@ namespace CommandInfoUpdater
                 var updatedCommand = new RespCommandsInfo
                 {
                     Command = baseCommand.Command,
-                    ArrayCommand = baseCommand.ArrayCommand,
                     Name = baseCommand.Name,
                     Arity = baseCommand.Arity,
                     Flags = baseCommand.Flags,

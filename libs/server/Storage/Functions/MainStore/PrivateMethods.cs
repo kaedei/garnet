@@ -3,6 +3,7 @@
 
 using System;
 using System.Buffers;
+using System.Diagnostics;
 using Garnet.common;
 using Tsavorite.core;
 
@@ -11,7 +12,7 @@ namespace Garnet.server
     /// <summary>
     /// Callback functions for main store
     /// </summary>
-    public readonly unsafe partial struct MainStoreFunctions : IFunctions<SpanByte, SpanByte, SpanByte, SpanByteAndMemory, long>
+    public readonly unsafe partial struct MainSessionFunctions : ISessionFunctions<SpanByte, SpanByte, SpanByte, SpanByteAndMemory, long>
     {
         static void CopyTo(ref SpanByte src, ref SpanByteAndMemory dst, MemoryPool<byte> memoryPool)
         {
@@ -81,11 +82,20 @@ namespace Garnet.server
             }
         }
 
-        void CopyRespToWithInput(ref SpanByte input, ref SpanByte value, ref SpanByteAndMemory dst)
+        void CopyRespToWithInput(ref SpanByte input, ref SpanByte value, ref SpanByteAndMemory dst, bool isFromPending)
         {
             var inputPtr = input.ToPointer();
             switch ((RespCommand)(*inputPtr))
             {
+                case RespCommand.ASYNC:
+                    // If the GET is expected to complete continuations asynchronously, we should not write anything
+                    // to the network buffer in case the operation does go pending (latter is indicated by isFromPending)
+                    // This is accomplished by calling ConvertToHeap on the destination SpanByteAndMemory
+                    if (isFromPending)
+                        dst.ConvertToHeap();
+                    CopyRespTo(ref value, ref dst);
+                    break;
+
                 case RespCommand.MIGRATE:
                     long expiration = value.ExtraMetadata;
                     if (value.Length <= dst.Length)
@@ -212,28 +222,28 @@ namespace Garnet.server
                 switch (optionType)
                 {
                     case ExpireOption.NX:
-                        o->countDone = 0;
+                        o->result1 = 0;
                         break;
                     case ExpireOption.XX:
                     case ExpireOption.None:
                         value.ExtraMetadata = input.ExtraMetadata;
-                        o->countDone = 1;
+                        o->result1 = 1;
                         break;
                     case ExpireOption.GT:
                         bool replace = input.ExtraMetadata < value.ExtraMetadata;
                         value.ExtraMetadata = replace ? value.ExtraMetadata : input.ExtraMetadata;
                         if (replace)
-                            o->countDone = 0;
+                            o->result1 = 0;
                         else
-                            o->countDone = 1;
+                            o->result1 = 1;
                         break;
                     case ExpireOption.LT:
                         replace = input.ExtraMetadata > value.ExtraMetadata;
                         value.ExtraMetadata = replace ? value.ExtraMetadata : input.ExtraMetadata;
                         if (replace)
-                            o->countDone = 0;
+                            o->result1 = 0;
                         else
-                            o->countDone = 1;
+                            o->result1 = 1;
                         break;
                     default:
                         throw new GarnetException($"EvaluateExpireInPlace exception expiryExists:{expiryExists}, optionType{optionType}");
@@ -250,7 +260,7 @@ namespace Garnet.server
                     case ExpireOption.XX:
                     case ExpireOption.GT:
                     case ExpireOption.LT:
-                        o->countDone = 0;
+                        o->result1 = 0;
                         return true;
                     default:
                         throw new GarnetException($"EvaluateExpireInPlace exception expiryExists:{expiryExists}, optionType{optionType}");
@@ -272,25 +282,25 @@ namespace Garnet.server
                     case ExpireOption.None:
                         newValue.ExtraMetadata = input.ExtraMetadata;
                         oldValue.AsReadOnlySpan().CopyTo(newValue.AsSpan());
-                        o->countDone = 1;
+                        o->result1 = 1;
                         break;
                     case ExpireOption.GT:
                         oldValue.AsReadOnlySpan().CopyTo(newValue.AsSpan());
                         bool replace = input.ExtraMetadata < oldValue.ExtraMetadata;
                         newValue.ExtraMetadata = replace ? oldValue.ExtraMetadata : input.ExtraMetadata;
                         if (replace)
-                            o->countDone = 0;
+                            o->result1 = 0;
                         else
-                            o->countDone = 1;
+                            o->result1 = 1;
                         break;
                     case ExpireOption.LT:
                         oldValue.AsReadOnlySpan().CopyTo(newValue.AsSpan());
                         replace = input.ExtraMetadata > oldValue.ExtraMetadata;
                         newValue.ExtraMetadata = replace ? oldValue.ExtraMetadata : input.ExtraMetadata;
                         if (replace)
-                            o->countDone = 0;
+                            o->result1 = 0;
                         else
-                            o->countDone = 1;
+                            o->result1 = 1;
                         break;
                 }
             }
@@ -302,13 +312,13 @@ namespace Garnet.server
                     case ExpireOption.None:
                         newValue.ExtraMetadata = input.ExtraMetadata;
                         oldValue.AsReadOnlySpan().CopyTo(newValue.AsSpan());
-                        o->countDone = 1;
+                        o->result1 = 1;
                         break;
                     case ExpireOption.XX:
                     case ExpireOption.GT:
                     case ExpireOption.LT:
                         oldValue.AsReadOnlySpan().CopyTo(newValue.AsSpan());
-                        o->countDone = 0;
+                        o->result1 = 0;
                         break;
                 }
             }
@@ -345,13 +355,15 @@ namespace Garnet.server
             var ndigits = NumUtils.NumDigitsInLong(val, ref fNeg);
             ndigits += fNeg ? 1 : 0;
 
-            if (ndigits > value.Length)
+            if (ndigits > value.LengthWithoutMetadata)
                 return false;
 
             rmwInfo.ClearExtraValueLength(ref recordInfo, ref value, value.TotalSize);
-            _ = value.ShrinkSerializedLength(ndigits + value.MetadataSize);
+            value.ShrinkSerializedLength(ndigits + value.MetadataSize);
             _ = NumUtils.LongToSpanByte(val, value.AsSpan());
             rmwInfo.SetUsedValueLength(ref recordInfo, ref value, value.TotalSize);
+
+            Debug.Assert(output.IsSpanByte, "This code assumes it is called in-place and did not go pending");
             value.AsReadOnlySpan().CopyTo(output.SpanByte.AsSpan());
             output.SpanByte.Length = value.LengthWithoutMetadata;
             return true;
@@ -493,6 +505,8 @@ namespace Garnet.server
         static void CopyValueLengthToOutput(ref SpanByte value, ref SpanByteAndMemory output)
         {
             int numDigits = NumUtils.NumDigits(value.LengthWithoutMetadata);
+
+            Debug.Assert(output.IsSpanByte, "This code assumes it is called in a non-pending context or in a pending context where dst.SpanByte's pointer remains valid");
             var outputPtr = output.SpanByte.ToPointer();
             NumUtils.IntToBytes(value.LengthWithoutMetadata, numDigits, ref outputPtr);
             output.SpanByte.Length = numDigits;

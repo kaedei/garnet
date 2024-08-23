@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 using System;
+using System.Text;
 using Garnet.common;
 using Garnet.server;
 using Microsoft.Extensions.Logging;
@@ -24,15 +25,29 @@ namespace Garnet.cluster
             if (address.Equals("NO", StringComparison.OrdinalIgnoreCase) &&
                 portStr.Equals("ONE", StringComparison.OrdinalIgnoreCase))
             {
-                clusterProvider.clusterManager?.TryResetReplica();
-                clusterProvider.replicationManager.TryUpdateForFailover();
-                UnsafeWaitForConfigTransition();
+                try
+                {
+                    if (!clusterProvider.replicationManager.StartRecovery())
+                    {
+                        logger?.LogError($"{nameof(TryREPLICAOF)}: {{logMessage}}", Encoding.ASCII.GetString(CmdStrings.RESP_ERR_GENERIC_CANNOT_ACQUIRE_RECOVERY_LOCK));
+                        while (!RespWriteUtils.WriteError(CmdStrings.RESP_ERR_GENERIC_CANNOT_ACQUIRE_RECOVERY_LOCK, ref dcurr, dend))
+                            SendAndReset();
+                        return true;
+                    }
+                    clusterProvider.clusterManager.TryResetReplica();
+                    clusterProvider.replicationManager.TryUpdateForFailover();
+                    UnsafeBumpAndWaitForEpochTransition();
+                }
+                finally
+                {
+                    clusterProvider.replicationManager.SuspendRecovery();
+                }
             }
             else
             {
                 if (!int.TryParse(portStr, out var port))
                 {
-                    logger?.LogWarning("TryREPLICAOF failed to parse port {port}", portStr);
+                    logger?.LogWarning($"{nameof(TryREPLICAOF)} failed to parse port {{port}}", portStr);
                     while (!RespWriteUtils.WriteError($"ERR REPLICAOF failed to parse port '{portStr}'", ref dcurr, dend))
                         SendAndReset();
                     return true;
